@@ -2341,6 +2341,12 @@ def main() -> None:
                   fg="#CDD6F4", bg="#45475A", activebackground="#585B70",
                   relief="flat", padx=12, pady=4, command=_close,
                   ).pack(side="left")
+        credit = tk.Label(frame, text="Built by your friend, Vibe Coding with Gene",
+                          font=("Segoe UI", 8, "italic"), fg="#1a4f9c",
+                          bg="#F2ECC3", cursor="hand2", padx=10, pady=2)
+        credit.pack(pady=(12, 0))
+        credit.bind("<Button-1>",
+                    lambda e: webbrowser.open("https://x.com/with_gene2626"))
         root.protocol("WM_DELETE_WINDOW", _close)
         root.withdraw()
         _poll()
