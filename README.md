@@ -34,6 +34,9 @@ Google Remote Desktop (see hotkey notes).
 ![Settings](docs/dialog-settings.png)
 *Checkbox options — auto-copy, auto-paste, PRD copy*
 
+![Paste target](docs/dialog-paste-target.png)
+*Whitelist which app receives the paste — priority order, per-app Enter*
+
 ![PRD prompt editor](docs/dialog-prd-prompt.png)
 *Edit the PRD prompt*
 
@@ -83,6 +86,12 @@ Google Remote Desktop (see hotkey notes).
   the text is already on the clipboard and saved to
   `state/last_transcription.txt`; PRD generating/done states never
   auto-close.
+- **Paste targets (optional)** — Settings → *Paste Target…*: whitelist the
+  apps that should receive your transcriptions. Picks the first running
+  app in priority order (its most recently used window when several are
+  open), steers focus to it, pastes — and presses Enter, if enabled —
+  then returns focus to where you were. Falls back to the focused field
+  (with a toast) when no whitelisted app is running. Off by default.
 - **State split**: secrets in `secrets/`, runtime state in `state/`,
   source at the repo root.
 

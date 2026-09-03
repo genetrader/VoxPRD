@@ -1544,28 +1544,156 @@ def _copy_to_clipboard_raw(text: str) -> None:
         kernel32.GlobalFree(h_mem)
 
 
+# ---------------------------------------------------------------------------
+# Paste targets: window enumeration + last-active tracking
+# ---------------------------------------------------------------------------
+_last_active_by_proc: dict[str, int] = {}
+_foreground_hook = None
+_foreground_proc_ref = None
+
+
+def _process_name_of(hwnd) -> str | None:
+    pid = ctypes.wintypes.DWORD()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return None
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        size = ctypes.wintypes.DWORD(512)
+        if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value.rsplit("\\", 1)[-1].lower()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+    return None
+
+
+def _enumerate_app_windows() -> list[tuple[str, str, int]]:
+    """(process_name, window_title, hwnd) for visible top-level windows."""
+    results: list[tuple[str, str, int]] = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+
+    def cb(hwnd, lparam):
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        if ctypes.windll.user32.GetWindowLongW(hwnd, -20) & 0x80:  # WS_EX_TOOLWINDOW
+            return True
+        n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if n <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
+        name = _process_name_of(hwnd)
+        if name:
+            results.append((name, buf.value, int(hwnd)))
+        return True
+
+    ctypes.windll.user32.EnumWindows(WNDENUMPROC(cb), 0)
+    return results
+
+
+def _find_windows_for_process(name: str) -> list[int]:
+    name = name.lower()
+    return [hwnd for (pname, _title, hwnd) in _enumerate_app_windows() if pname == name]
+
+
+def _run_foreground_tracker() -> None:
+    """Record the last-active top-level window per process, so a paste
+    target with several open windows resolves to the most recently used."""
+    global _foreground_hook, _foreground_proc_ref
+    EVENT_SYSTEM_FOREGROUND = 0x0003
+    WINEVENT_OUTOFCONTEXT = 0x0000
+    WINEVENTPROC = ctypes.WINFUNCTYPE(
+        None, ctypes.c_void_p, ctypes.c_uint, ctypes.wintypes.HWND,
+        ctypes.c_long, ctypes.c_long)
+
+    def on_event(hook, event, hwnd, id_object, id_child):
+        try:
+            name = _process_name_of(hwnd)
+            if name:
+                _last_active_by_proc[name] = int(hwnd)
+        except Exception:
+            pass
+
+    _foreground_proc_ref = WINEVENTPROC(on_event)
+    _foreground_hook = ctypes.windll.user32.SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0,
+        _foreground_proc_ref, 0, 0, WINEVENT_OUTOFCONTEXT)
+    if not _foreground_hook:
+        return
+    msg = ctypes.wintypes.MSG()
+    while ctypes.windll.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        pass
+
+
+def _resolve_paste_target() -> tuple[int, str] | None:
+    """First whitelisted app that has a live window → (hwnd, process).
+    Prefers that app's last-active window when several are open."""
+    for entry in CONFIG.get("paste_targets", []):
+        name = str(entry.get("process", "")).lower()
+        if not name:
+            continue
+        hwnds = _find_windows_for_process(name)
+        if not hwnds:
+            continue
+        last = _last_active_by_proc.get(name)
+        hwnd = last if last in hwnds else hwnds[0]
+        return hwnd, name
+    return None
+
+
+def _force_foreground(hwnd: int) -> None:
+    if ctypes.windll.user32.SetForegroundWindow(hwnd):
+        return
+    # Windows denies focus changes from background processes; a synthetic
+    # ALT press re-grants the right (standard workaround).
+    keyboard.press("alt")
+    keyboard.release("alt")
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+
+
 def _auto_paste_after_copy() -> None:
-    """Optional: paste the just-copied transcription into whatever field
-    the user had focus in. The completion toast/overlay can steal focus in
-    between, so the original foreground window is captured first and
-    restored before sending Ctrl+V."""
+    """Optional: paste the just-copied transcription into the focused
+    field — or, with a paste-target whitelist, into the highest-priority
+    whitelisted app via brief focus-steering (original focus restored)."""
     if not CONFIG.get("auto_paste_to_field", False):
         return
+    user32 = ctypes.windll.user32
     try:
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        orig = user32.GetForegroundWindow()
     except Exception:
-        hwnd = 0
+        orig = 0
+
+    target: tuple[int, str] | None = None
+    if CONFIG.get("paste_target_enabled", False):
+        target = _resolve_paste_target()
+        if target is None:
+            notify("Whitelisted app not running — pasting into the focused field",
+                   "Voice Hotkey")
+    hwnd, tname = target if target else (orig, "")
+
+    use_enter = bool(CONFIG.get("auto_paste_enter", False))
+    if target:
+        for e in CONFIG.get("paste_targets", []):
+            if str(e.get("process", "")).lower() == tname and e.get("enter") is not None:
+                use_enter = bool(e["enter"])
+                break
 
     def _paste() -> None:
         time.sleep(0.25)
         try:
-            if hwnd and ctypes.windll.user32.GetForegroundWindow() != hwnd:
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-                time.sleep(0.05)
+            if hwnd and user32.GetForegroundWindow() != hwnd:
+                _force_foreground(hwnd)
+                time.sleep(0.12)
             keyboard.send("ctrl+v")
-            if CONFIG.get("auto_paste_enter", False):
+            if use_enter:
                 time.sleep(0.15)
                 keyboard.send("enter")
+            if target and orig and orig != hwnd:
+                time.sleep(0.05)
+                _force_foreground(orig)
         except Exception as e:
             log_error(f"Auto-paste failed: {e}")
 
@@ -2212,6 +2340,186 @@ def main() -> None:
 
     _ui.run(_run_settings_dialog)
 
+    # --- Paste Target dialog (whitelist + priority) ---
+    def on_paste_target(icon, item):
+        pt_open[0] = True
+
+    pt_open: list[bool] = [False]
+
+    def _run_paste_target_dialog() -> None:
+        state: dict = {"targets": []}
+        running_names: list[str] = []
+        ENTER_LABEL = {None: "", True: "   [↵]", False: "   [no ↵]"}
+        ENTER_VALUE = {"Follow global": None, "Yes": True, "No": False}
+
+        def _refresh_lists() -> None:
+            wl.delete(0, tk.END)
+            for i, e in enumerate(state["targets"], 1):
+                wl.insert(tk.END, f"{i}.  {e.get('process', '')}"
+                          + ENTER_LABEL[e.get("enter")])
+            whitelisted = {str(e.get("process", "")).lower() for e in state["targets"]}
+            apps = _enumerate_app_windows()
+            seen: set[str] = set()
+            running_names.clear()
+            run.delete(0, tk.END)
+            for name, title, _hwnd in apps:
+                if name in seen or name in whitelisted:
+                    continue
+                seen.add(name)
+                running_names.append(name)
+                run.insert(tk.END, f"{name} — {title[:36]}")
+
+        def _add() -> None:
+            sel = run.curselection()
+            if not sel:
+                return
+            state["targets"].append({"process": running_names[sel[0]], "enter": None})
+            _refresh_lists()
+
+        def _remove() -> None:
+            sel = wl.curselection()
+            if not sel:
+                return
+            del state["targets"][sel[0]]
+            _refresh_lists()
+
+        def _move(delta: int) -> None:
+            sel = wl.curselection()
+            if not sel:
+                return
+            i, j = sel[0], sel[0] + delta
+            if not (0 <= j < len(state["targets"])):
+                return
+            state["targets"][i], state["targets"][j] = state["targets"][j], state["targets"][i]
+            _refresh_lists()
+            wl.selection_set(j)
+
+        def _apply_enter(_evt=None) -> None:
+            sel = wl.curselection()
+            if not sel:
+                return
+            state["targets"][sel[0]]["enter"] = ENTER_VALUE[entry_enter_var.get()]
+
+        def _sync_enter(_evt=None) -> None:
+            sel = wl.curselection()
+            if not sel:
+                return
+            v = state["targets"][sel[0]].get("enter")
+            entry_enter_var.set({None: "Follow global", True: "Yes", False: "No"}[v])
+
+        def _save() -> None:
+            global CONFIG
+            try:
+                CONFIG = load_config()
+                CONFIG["paste_target_enabled"] = bool(mode_var.get())
+                CONFIG["paste_targets"] = state["targets"]
+                CONFIG_PATH.write_text(
+                    json.dumps(CONFIG, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                notify("Paste target saved" + (" — ON" if mode_var.get() else ""),
+                       "Voice Hotkey")
+                root.withdraw()
+            except (OSError, ValueError) as e:
+                log_error(f"Failed to save paste target: {e}")
+                notify(f"Save failed: {e}", "Voice Hotkey Error")
+
+        def _close() -> None:
+            root.withdraw()
+
+        def _poll() -> None:
+            if pt_open[0]:
+                pt_open[0] = False
+                state["targets"] = [dict(e) for e in CONFIG.get("paste_targets", [])]
+                mode_var.set(bool(CONFIG.get("paste_target_enabled", False)))
+                _refresh_lists()
+                root.deiconify()
+                root.lift()
+            root.after(80, _poll)
+
+        root = tk.Toplevel(_ui.root)
+        root.title("Voice Hotkey — Paste Target")
+        root.configure(bg="#1E1E2E")
+        root.attributes("-topmost", True)
+        frame = tk.Frame(root, bg="#1E1E2E", padx=14, pady=10)
+        frame.pack()
+        mode_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(frame, variable=mode_var,
+                       text="Paste into whitelisted app instead of the focused field",
+                       font=("Segoe UI", 10, "bold"), fg="#CDD6F4", bg="#1E1E2E",
+                       activebackground="#1E1E2E", activeforeground="#CDD6F4",
+                       selectcolor="#2A2A3E", anchor="w").pack(anchor="w", pady=(0, 6))
+        tk.Label(frame, text="Picks the first running app in priority order; with several\n"
+                             "windows of that app, the one you last used. Falls back to the\n"
+                             "focused field (with a toast) when none are running.",
+                 font=("Segoe UI", 9), fg="#A6ADC8", bg="#1E1E2E",
+                 justify="left").pack(anchor="w", pady=(0, 8))
+
+        cols = tk.Frame(frame, bg="#1E1E2E")
+        cols.pack(fill="both", expand=True)
+        left = tk.Frame(cols, bg="#1E1E2E")
+        left.pack(side="left", fill="both", expand=True)
+        mid = tk.Frame(cols, bg="#1E1E2E")
+        mid.pack(side="left", padx=8)
+        right = tk.Frame(cols, bg="#1E1E2E")
+        right.pack(side="left", fill="both", expand=True)
+
+        tk.Label(left, text="Running apps", font=("Segoe UI", 9, "bold"),
+                 fg="#89B4FA", bg="#1E1E2E").pack(anchor="w")
+        run = tk.Listbox(left, width=34, height=10, bg="#2A2A3E", fg="#A6ADC8",
+                         relief="flat", selectbackground="#45475A",
+                         highlightthickness=0, exportselection=False)
+        run.pack(fill="both", pady=(2, 4))
+        run.bind("<Double-Button-1>", lambda e: _add())
+        tk.Button(mid, text="Add ▶", font=("Segoe UI", 9, "bold"),
+                  fg="#1E1E2E", bg="#A6E3A1", activebackground="#B8F0B0",
+                  relief="flat", padx=10, pady=3, command=_add,
+                  ).pack(pady=(14, 0))
+
+        tk.Label(right, text="Whitelist (priority order)", font=("Segoe UI", 9, "bold"),
+                 fg="#89B4FA", bg="#1E1E2E").pack(anchor="w")
+        wl = tk.Listbox(right, width=30, height=6, bg="#2A2A3E", fg="#A6ADC8",
+                        relief="flat", selectbackground="#45475A",
+                        highlightthickness=0, exportselection=False)
+        wl.pack(fill="both", pady=(2, 4))
+        wl.bind("<<ListboxSelect>>", _sync_enter)
+        wbtns = tk.Frame(right, bg="#1E1E2E")
+        wbtns.pack(fill="x")
+        for text, delta in (("▲", -1), ("▼", 1)):
+            tk.Button(wbtns, text=text, font=("Segoe UI", 9, "bold"),
+                      fg="#CDD6F4", bg="#45475A", activebackground="#585B70",
+                      relief="flat", padx=8, pady=2,
+                      command=lambda d=delta: _move(d)).pack(side="left", padx=(0, 4))
+        tk.Button(wbtns, text="Remove", font=("Segoe UI", 9, "bold"),
+                  fg="#CDD6F4", bg="#45475A", activebackground="#585B70",
+                  relief="flat", padx=8, pady=2, command=_remove,
+                  ).pack(side="left")
+        erow = tk.Frame(right, bg="#1E1E2E")
+        erow.pack(fill="x", pady=(6, 0))
+        tk.Label(erow, text="Enter:", font=("Segoe UI", 9), fg="#A6ADC8",
+                 bg="#1E1E2E").pack(side="left", padx=(0, 4))
+        entry_enter_var = tk.StringVar(value="Follow global")
+        ttk.Combobox(erow, state="readonly", width=12, textvariable=entry_enter_var,
+                     values=list(ENTER_VALUE)).pack(side="left")
+        entry_enter_var.trace_add("write", lambda *_: _apply_enter())
+
+        btns = tk.Frame(frame, bg="#1E1E2E")
+        btns.pack(fill="x", pady=(10, 0))
+        tk.Button(btns, text="Save", font=("Segoe UI", 10, "bold"),
+                  fg="#1E1E2E", bg="#A6E3A1", activebackground="#B8F0B0",
+                  relief="flat", padx=16, pady=4, command=_save,
+                  ).pack(side="left", padx=(0, 8))
+        tk.Button(btns, text="Close", font=("Segoe UI", 10, "bold"),
+                  fg="#CDD6F4", bg="#45475A", activebackground="#585B70",
+                  relief="flat", padx=12, pady=4, command=_close,
+                  ).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", _close)
+        root.withdraw()
+        _poll()
+
+    _ui.run(_run_paste_target_dialog)
+    threading.Thread(target=_run_foreground_tracker, daemon=True).start()
+
     # --- STT endpoint picker + health watch ---
     def on_stt_settings(icon, item):
         stt_open[0] = True
@@ -2392,6 +2700,7 @@ def main() -> None:
     hotkey_label = hotkey_display(CONFIG.get("hotkey", "ctrl+alt+v"))
     settings_menu = pystray.Menu(
         pystray.MenuItem("Options…", on_open_settings),
+        pystray.MenuItem("Paste Target…", on_paste_target),
         pystray.MenuItem("Change Hotkey…", on_change_hotkey),
         pystray.MenuItem("STT Endpoint & Model…", on_stt_settings),
         pystray.MenuItem("LLM Endpoint & Model…", on_llm_settings),
