@@ -5,7 +5,9 @@
 # VoxPRD
 
 Local-first voice dictation for Windows. Press a global hotkey (or a mouse
-button), talk — the transcription lands on your clipboard, or becomes a
+button), talk — and the text lands wherever you want it: your clipboard,
+the field you're typing in, or **straight into another app** (your AI
+chat, an editor, anywhere) with Enter included. Or it becomes a
 structured, agent-ready PRD via your own local LLM.
 
 Built as a system-tray app: no windows, no cloud required. Works through
@@ -53,6 +55,14 @@ Google Remote Desktop (see hotkey notes).
   Save keeps it, Clear re-listens, Cancel discards. `win+…` combos are
   rejected (OS-reserved). Quick double-press aborts a recording.
 - **Live waveform overlay** while recording; tray icon shows state.
+- **Paste targets — dictate into another app while you keep working.**
+  Whitelist the apps that should receive your transcriptions (Settings →
+  *Paste Target…*). Keep typing in your editor, hit the hotkey, talk —
+  and the text lands in your AI assistant's chat box and sends itself,
+  then focus snaps back to where you were. Picks the first running app
+  in priority order (its most-recently-used window when several are
+  open), with per-app Enter control, and falls back to the focused field
+  (with a toast) when none are running.
 - **Whisper transcription** via a configurable provider chain
   (self-hosted endpoint → OpenAI cloud → local Whisper). See
   [Speech-to-text engines](#speech-to-text-engines) below.
@@ -86,12 +96,6 @@ Google Remote Desktop (see hotkey notes).
   the text is already on the clipboard and saved to
   `state/last_transcription.txt`; PRD generating/done states never
   auto-close.
-- **Paste targets (optional)** — Settings → *Paste Target…*: whitelist the
-  apps that should receive your transcriptions. Picks the first running
-  app in priority order (its most recently used window when several are
-  open), steers focus to it, pastes — and presses Enter, if enabled —
-  then returns focus to where you were. Falls back to the focused field
-  (with a toast) when no whitelisted app is running. Off by default.
 - **State split**: secrets in `secrets/`, runtime state in `state/`,
   source at the repo root.
 
