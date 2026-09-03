@@ -2501,6 +2501,10 @@ def main() -> None:
         entry_enter_var = tk.StringVar(value="Follow global")
         ttk.Combobox(erow, state="readonly", width=12, textvariable=entry_enter_var,
                      values=list(ENTER_VALUE)).pack(side="left")
+        tk.Label(right, text="Follow global = the Press Enter checkbox in Options…;\n"
+                             "Yes / No override it for this app.",
+                 font=("Segoe UI", 8), fg="#6C7086", bg="#1E1E2E",
+                 justify="left", anchor="w").pack(anchor="w", pady=(2, 0))
         entry_enter_var.trace_add("write", lambda *_: _apply_enter())
 
         btns = tk.Frame(frame, bg="#1E1E2E")
