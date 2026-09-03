@@ -7,6 +7,35 @@ structured, agent-ready PRD via your own local LLM.
 Built as a system-tray app: no windows, no cloud required. Works through
 Google Remote Desktop (see hotkey notes).
 
+## Screenshots
+
+![Recording](docs/overlay-recording.png)
+*Recording — live waveform*
+
+![Transcription ready](docs/overlay-memo.png)
+*Transcription ready — Copy or PRD*
+
+![PRD done](docs/overlay-prd-done.png)
+*PRD done — turns yellow and stays open*
+
+![STT endpoint discovery](docs/dialog-stt-endpoint.png)
+*STT endpoint discovery*
+
+![LLM endpoint discovery](docs/dialog-llm-endpoint.png)
+*LLM endpoint discovery*
+
+![Hotkey picker](docs/dialog-hotkey-picker.png)
+*Pick any key — or mouse button*
+
+![PRD prompt editor](docs/dialog-prd-prompt.png)
+*Edit the PRD prompt*
+
+![STT warning](docs/overlay-stt-warning.png)
+*STT endpoint down — dismissible warning*
+
+![Toast](docs/toast.png)
+*Completion toast*
+
 ## Features
 
 - **Global hotkey** — any key combo *or any mouse button* (middle/side
@@ -31,6 +60,12 @@ Google Remote Desktop (see hotkey notes).
   OpenAI-compatible server — llama.cpp, vLLM, LM Studio, Speaches…), pick
   a model; saved as the first `prd` provider with the rest kept as
   fallbacks.
+- **STT endpoint picker + health watch** — tray → *STT Endpoint & Model…*:
+  same discovery for the transcription server (probes `/v1/models`, then
+  `/health` for plain faster-whisper wrappers). A background poll turns
+  the tray icon **red** when the primary STT endpoint stops answering,
+  toasts on the change, and pressing the hotkey while it's down shows a
+  dismissible "check your transcription configuration" panel.
 - **State split**: secrets in `secrets/`, runtime state in `state/`,
   source at the repo root.
 

@@ -436,6 +436,9 @@ _MOUSE_BUTTON_NAMES = {
 # captured press doesn't also start a recording.
 _picker_capturing = [False]
 
+# True when the primary STT endpoint answered the last health probe.
+_stt_healthy = [True]
+
 
 def hotkey_is_mouse(hotkey_str: str) -> bool:
     return isinstance(hotkey_str, str) and hotkey_str.lower().startswith("mouse:")
@@ -497,6 +500,60 @@ def _discover_models(base_url: str, timeout: int = 6) -> list[str]:
     resp.raise_for_status()
     data = resp.json().get("data", [])
     return sorted(m.get("id", "") for m in data if m.get("id"))
+
+
+def _discover_stt(base_url: str, timeout: int = 6) -> tuple[list[str], str]:
+    """Probe a speech-to-text server. Returns (models, source).
+
+    OpenAI-compatible servers (Speaches etc.) list models at /v1/models;
+    plain faster-whisper wrappers often only serve /health with a JSON
+    body containing the model name. Raises if neither answers.
+    """
+    url = base_url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    try:
+        resp = requests.get(f"{url}/v1/models", timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        models = sorted(m.get("id", "") for m in data if m.get("id"))
+        if models:
+            return models, "models"
+    except (requests.RequestException, ValueError):
+        pass
+    resp = requests.get(f"{url}/health", timeout=timeout)
+    resp.raise_for_status()
+    try:
+        info = resp.json()
+    except ValueError:
+        return ["whisper-1"], "health"
+    model = info.get("model") or info.get("id") or "whisper-1"
+    return [str(model)], "health"
+
+
+def _probe_stt_primary() -> bool:
+    """True if the first whisper provider (when it's a fleet endpoint)
+    answers /health or /v1/models. Cloud/local providers aren't monitored."""
+    chain = CONFIG.get("whisper", {}).get("providers", [])
+    if not chain:
+        return True
+    first = chain[0]
+    if first.get("type") != "fleet" or not first.get("url"):
+        return True
+    base = first["url"].rstrip("/")
+    for suffix in ("/v1/audio/transcriptions", "/audio/transcriptions"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    try:
+        if requests.get(f"{base}/health", timeout=4).status_code < 500:
+            return True
+    except requests.RequestException:
+        pass
+    try:
+        return requests.get(f"{base}/v1/models", timeout=4).status_code < 500
+    except requests.RequestException:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +648,72 @@ def notify(message: str, title: str = "Voice Hotkey", timeout: int = 3) -> None:
         _notify_overlay.show(title, message, timeout)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# STT-down warning (dismissible panel)
+# ---------------------------------------------------------------------------
+_stt_warning_overlay: "SttWarningOverlay | None" = None
+
+
+class SttWarningOverlay:
+    """Small dismissible 'STT is down' panel. Persistent root — withdrawn,
+    never destroyed (same Tk rule as every other overlay)."""
+
+    def __init__(self):
+        self._root: tk.Tk | None = None
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run_tk, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def _run_tk(self):
+        self._root = tk.Tk()
+        self._root.overrideredirect(True)
+        self._root.attributes("-topmost", True)
+        self._root.configure(bg="#7F1D1D")
+        frame = tk.Frame(self._root, bg="#7F1D1D", padx=14, pady=10)
+        frame.pack()
+        tk.Label(frame, text="⚠  Speech-to-text unreachable",
+                 font=("Segoe UI", 11, "bold"), fg="#FECACA",
+                 bg="#7F1D1D", anchor="w").pack(fill="x")
+        tk.Label(frame,
+                 text="Please check your transcription configuration.\n"
+                      "Tray → STT Endpoint & Model… to fix the endpoint.",
+                 font=("Segoe UI", 9), fg="#FCA5A5", bg="#7F1D1D",
+                 anchor="w", justify="left").pack(fill="x", pady=(2, 0))
+        tk.Button(frame, text="✕  Close", font=("Segoe UI", 9),
+                  fg="#FCA5A5", bg="#7F1D1D", activebackground="#991B1B",
+                  relief="flat", padx=10, pady=2, command=self.hide,
+                  ).pack(anchor="e", pady=(6, 0))
+        self._root.update_idletasks()
+        w = self._root.winfo_reqwidth()
+        h = self._root.winfo_reqheight()
+        sw = self._root.winfo_screenwidth()
+        sh = self._root.winfo_screenheight()
+        self._root.geometry(f"+{sw - w - 16}+{sh - h - 120}")
+        self._root.withdraw()
+        self._ready.set()
+        self._root.mainloop()
+
+    def show(self):
+        if self._root:
+            try:
+                self._root.after(0, lambda: (self._root.deiconify(), self._root.lift()))
+            except Exception:
+                pass
+
+    def hide(self):
+        if self._root:
+            try:
+                self._root.after(0, self._root.withdraw)
+            except Exception:
+                pass
+
+
+def _show_stt_warning() -> None:
+    if _stt_warning_overlay is not None:
+        _stt_warning_overlay.show()
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1125,8 @@ def make_icon(color: str = "gray") -> Image.Image:
         fill, outline = (34, 197, 94), (22, 163, 74)
     elif color == "orange":
         fill, outline = (249, 115, 22), (234, 88, 12)
+    elif color == "red":
+        fill, outline = (220, 38, 38), (153, 27, 27)  # STT endpoint down
     else:
         fill, outline = (148, 163, 184), (100, 116, 139)
     draw.ellipse([4, 4, size - 4, size - 4], fill=fill, outline=outline, width=2)
@@ -1036,6 +1161,10 @@ class Recorder:
 
     def update_icon(self, color: str):
         if self._tray_icon:
+            # Idle-gray turns red while the primary STT endpoint is down;
+            # recording/processing states always win.
+            if color == "gray" and not _stt_healthy[0]:
+                color = "red"
             try:
                 self._tray_icon.icon = make_icon(color)
             except Exception:
@@ -1489,6 +1618,8 @@ def main() -> None:
     _send_copy_overlay = SendCopyOverlay(
         auto_send_timeout=int(CONFIG.get("auto_send_timeout", 0))
     )
+    global _stt_warning_overlay
+    _stt_warning_overlay = SttWarningOverlay()
 
     _hotkey_reload_event = threading.Event()
 
@@ -1945,6 +2076,184 @@ def main() -> None:
     threading.Thread(target=_run_prd_prompt_editor, daemon=True).start()
     threading.Thread(target=_run_llm_settings, daemon=True).start()
 
+    # --- STT endpoint picker + health watch ---
+    def on_stt_settings(icon, item):
+        stt_open[0] = True
+
+    stt_open: list[bool] = [False]
+    stt_queue: "queue.Queue[tuple]" = queue.Queue()
+
+    def _run_stt_settings() -> None:
+        def _current_base() -> str:
+            for p in CONFIG.get("whisper", {}).get("providers", []):
+                if p.get("type") == "fleet" and p.get("url"):
+                    u = p["url"].rstrip("/")
+                    for suf in ("/v1/audio/transcriptions", "/audio/transcriptions"):
+                        if u.endswith(suf):
+                            return u[: -len(suf)]
+                    return u
+            return ""
+
+        def _current_model() -> str:
+            for p in CONFIG.get("whisper", {}).get("providers", []):
+                if p.get("type") == "fleet":
+                    return p.get("model", "whisper-1")
+            return "whisper-1"
+
+        def _discover() -> None:
+            url = stt_url_var.get().strip()
+            if not url:
+                return
+
+            def work() -> None:
+                try:
+                    models, source = _discover_stt(url)
+                    stt_queue.put(("ok", models, source))
+                except Exception as e:
+                    stt_queue.put(("err", str(e), ""))
+
+            stt_status.config(text="Discovering…", fg="#F59E0B")
+            threading.Thread(target=work, daemon=True).start()
+
+        def _save() -> None:
+            url = stt_url_var.get().strip()
+            model = stt_model_var.get().strip() or "whisper-1"
+            if not url:
+                stt_status.config(text="Need a URL", fg="#F87171")
+                return
+            base = url.rstrip("/")
+            for suf in ("/v1/audio/transcriptions", "/audio/transcriptions"):
+                if base.endswith(suf):
+                    base = base[: -len(suf)]
+            if not base.startswith(("http://", "https://")):
+                base = "http://" + base
+            global CONFIG
+            try:
+                CONFIG = load_config()
+                wchain = CONFIG.setdefault("whisper", {}).setdefault("providers", [])
+                full = f"{base}/v1/audio/transcriptions"
+                wchain = [p for p in wchain if p.get("url") != full]
+                wchain.insert(0, {
+                    "type": "fleet", "name": "custom-stt",
+                    "url": full, "model": model, "timeout": 60,
+                })
+                CONFIG["whisper"]["providers"] = wchain
+                CONFIG_PATH.write_text(
+                    json.dumps(CONFIG, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                _stt_healthy[0] = _probe_stt_primary()
+                recorder.update_icon("gray")
+                notify(f"STT endpoint saved: {model}"
+                       + ("" if _stt_healthy[0] else " — endpoint not responding!"),
+                       "Voice Hotkey")
+                root.withdraw()
+            except (OSError, ValueError) as e:
+                log_error(f"Failed to save STT endpoint: {e}")
+                notify(f"Save failed: {e}", "Voice Hotkey Error")
+
+        def _close() -> None:
+            root.withdraw()
+
+        def _poll() -> None:
+            if stt_open[0]:
+                stt_open[0] = False
+                stt_url_var.set(_current_base())
+                stt_model_var.set(_current_model())
+                stt_status.config(text="Enter your STT server, then Discover.",
+                                  fg="#A6ADC8")
+                root.deiconify()
+                root.lift()
+            try:
+                kind, payload, source = stt_queue.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                if kind == "ok" and payload:
+                    stt_model_combo["values"] = payload
+                    if stt_model_var.get() not in payload:
+                        stt_model_var.set(payload[0])
+                    how = "via /v1/models" if source == "models" else "via /health"
+                    stt_status.config(text=f"{len(payload)} model(s) found {how}",
+                                      fg="#A6E3A1")
+                elif kind == "ok":
+                    stt_status.config(text="Server returned no models", fg="#F87171")
+                else:
+                    stt_status.config(text=f"Discovery failed: {payload[:80]}", fg="#F87171")
+            root.after(80, _poll)
+
+        root = tk.Tk()
+        root.title("Voice Hotkey — STT Endpoint & Model")
+        root.configure(bg="#1E1E2E")
+        root.attributes("-topmost", True)
+        frame = tk.Frame(root, bg="#1E1E2E", padx=14, pady=10)
+        frame.pack()
+        tk.Label(frame, text="STT Endpoint & Model", font=("Segoe UI", 11, "bold"),
+                 fg="#CDD6F4", bg="#1E1E2E").pack(anchor="w")
+        tk.Label(frame, text="OpenAI-compatible transcription server (Speaches,\n"
+                             "faster-whisper wrapper, …). Discover probes /v1/models\n"
+                             "then /health.",
+                 font=("Segoe UI", 9), fg="#A6ADC8", bg="#1E1E2E",
+                 justify="left").pack(anchor="w", pady=(2, 8))
+        row = tk.Frame(frame, bg="#1E1E2E")
+        row.pack(fill="x", pady=(0, 6))
+        tk.Label(row, text="URL:", font=("Segoe UI", 9), fg="#A6ADC8",
+                 bg="#1E1E2E").pack(side="left", padx=(0, 6))
+        stt_url_var = tk.StringVar()
+        tk.Entry(row, textvariable=stt_url_var, width=40, font=("Consolas", 9),
+                 fg="#A6ADC8", bg="#2A2A3E", relief="flat",
+                 insertbackground="#A6ADC8").pack(side="left", padx=(0, 8))
+        tk.Button(row, text="Discover", font=("Segoe UI", 9, "bold"),
+                  fg="#1E1E2E", bg="#89B4FA", activebackground="#B4D0FB",
+                  relief="flat", padx=12, pady=2, command=_discover,
+                  ).pack(side="left")
+        row2 = tk.Frame(frame, bg="#1E1E2E")
+        row2.pack(fill="x", pady=(0, 6))
+        tk.Label(row2, text="Model:", font=("Segoe UI", 9), fg="#A6ADC8",
+                 bg="#1E1E2E").pack(side="left", padx=(0, 6))
+        stt_model_var = tk.StringVar()
+        stt_model_combo = ttk.Combobox(row2, textvariable=stt_model_var, width=38)
+        stt_model_combo.pack(side="left")
+        stt_status = tk.Label(frame, text="", font=("Segoe UI", 9), fg="#A6ADC8",
+                              bg="#1E1E2E", anchor="w")
+        stt_status.pack(fill="x", pady=(2, 8))
+        btns = tk.Frame(frame, bg="#1E1E2E")
+        btns.pack(fill="x")
+        tk.Button(btns, text="Save", font=("Segoe UI", 10, "bold"),
+                  fg="#1E1E2E", bg="#A6E3A1", activebackground="#B8F0B0",
+                  relief="flat", padx=16, pady=4, command=_save,
+                  ).pack(side="left", padx=(0, 8))
+        tk.Button(btns, text="Close", font=("Segoe UI", 10, "bold"),
+                  fg="#CDD6F4", bg="#45475A", activebackground="#585B70",
+                  relief="flat", padx=12, pady=4, command=_close,
+                  ).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", _close)
+        root.withdraw()
+        _poll()
+        root.mainloop()
+
+    threading.Thread(target=_run_stt_settings, daemon=True).start()
+
+    # Health watch: poll the primary STT endpoint; red icon + warning on death.
+    _stt_last_state: list[bool] = [True]
+
+    def _stt_health_loop() -> None:
+        while True:
+            healthy = _probe_stt_primary()
+            _stt_healthy[0] = healthy
+            if healthy != _stt_last_state[0]:
+                _stt_last_state[0] = healthy
+                if healthy:
+                    notify("Speech-to-text endpoint is back online", "Voice Hotkey")
+                else:
+                    notify("Speech-to-text endpoint unreachable — check STT configuration",
+                           "Voice Hotkey Error")
+                    _show_stt_warning()
+                recorder.update_icon("gray")
+            time.sleep(45)
+
+    threading.Thread(target=_stt_health_loop, daemon=True).start()
+
     hotkey_label = hotkey_display(CONFIG.get("hotkey", "ctrl+alt+v"))
     menu = pystray.Menu(
         pystray.MenuItem(f"Voice Hotkey ({hotkey_label})", None, enabled=False),
@@ -1953,6 +2262,7 @@ def main() -> None:
         pystray.MenuItem("Last Transcription -> PRD", on_prd_from_last),
         pystray.MenuItem("Change Hotkey…", on_change_hotkey),
         pystray.MenuItem("Edit PRD Prompt…", on_edit_prd_prompt),
+        pystray.MenuItem("STT Endpoint & Model…", on_stt_settings),
         pystray.MenuItem("LLM Endpoint & Model…", on_llm_settings),
         pystray.MenuItem("Reload Config", on_reload_config),
         pystray.MenuItem("Restart", on_restart),
@@ -2026,6 +2336,8 @@ def main() -> None:
         # Must dispatch, not call recorder methods directly: Windows
         # silently removes low-level hooks whose callback exceeds ~300ms,
         # and mic stream setup can take longer than that.
+        if not _stt_healthy[0]:
+            _show_stt_warning()
         threading.Thread(
             target=recorder.abort if double else recorder.toggle,
             daemon=True,
