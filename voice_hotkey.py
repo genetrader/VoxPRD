@@ -64,7 +64,7 @@ from appsecrets import get as get_secret, get_required
 # Paths (absolute — works from any cwd)
 # ---------------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 SECRETS_DIR = APP_DIR / "secrets"
 STATE_DIR = APP_DIR / "state"
 RECORDINGS_DIR = STATE_DIR / "recordings"
