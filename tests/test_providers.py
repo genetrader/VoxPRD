@@ -40,7 +40,7 @@ def fake_audio_path(tmp_path):
 @pytest.fixture(autouse=True)
 def _clear_secrets_cache():
     """The secrets loader caches os.environ on first call. Reset between tests."""
-    import secrets as _secrets
+    import appsecrets as _secrets
     _secrets.reset_cache()
     yield
     _secrets.reset_cache()
@@ -102,7 +102,7 @@ def _mock_resp(status: int, text: str = "", headers: dict | None = None):
 
 def test_whisper_first_provider_succeeds(fake_audio_path):
     chain = [
-        {"type": "fleet", "name": "primary", "url": "http://192.168.1.100:9000/v1/audio/transcriptions", "model": "whisper-1"},
+        {"type": "fleet", "name": "primary", "url": "http://192.168.1.127:9000/v1/audio/transcriptions", "model": "whisper-1"},
         {"type": "local", "name": "fallback", "model": "base"},
     ]
     with patch("providers.requests.post", return_value=_mock_resp(200, "hello world")) as p:
@@ -115,7 +115,7 @@ def test_whisper_first_provider_succeeds(fake_audio_path):
 
 def test_whisper_falls_through_on_empty(fake_audio_path):
     chain = [
-        {"type": "fleet", "name": "primary", "url": "http://192.168.1.100:9000/v1/audio/transcriptions", "model": "w"},
+        {"type": "fleet", "name": "primary", "url": "http://192.168.1.127:9000/v1/audio/transcriptions", "model": "w"},
         {"type": "local", "name": "fallback", "model": "base"},
     ]
     with patch("providers.requests.post", return_value=_mock_resp(200, "")), \
@@ -173,11 +173,11 @@ def test_whisper_openai_skipped_without_key(monkeypatch, fake_audio_path, tmp_pa
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     # Point secrets at an empty tmp dir so secrets/.env from the project can't
     # supply a real key.
-    import secrets as _secrets
+    import appsecrets as _secrets
     monkeypatch.setattr(_secrets, "load_env", lambda app_dir=None: {})
     chain = [
         {"type": "openai", "name": "openai", "model": "whisper-1"},
-        {"type": "fleet", "name": "fleet", "url": "http://192.168.1.100:9000/v1/audio/transcriptions"},
+        {"type": "fleet", "name": "fleet", "url": "http://192.168.1.127:9000/v1/audio/transcriptions"},
     ]
     with patch("providers.requests.post", return_value=_mock_resp(200, "ok")) as p:
         result = transcribe_with_retry(fake_audio_path, chain)
@@ -192,7 +192,7 @@ def test_whisper_openai_skipped_without_key(monkeypatch, fake_audio_path, tmp_pa
 # ---------------------------------------------------------------------------
 def test_prd_first_provider_succeeds():
     chain = [
-        {"type": "openai_compatible", "name": "deepseek", "url": "http://192.168.1.100:8888/v1", "model": "ds"},
+        {"type": "openai_compatible", "name": "deepseek", "url": "http://192.168.1.127:8888/v1", "model": "ds"},
     ]
     payload = {
         "choices": [{"message": {"content": "# PRD\n\nGood stuff."}}]
@@ -211,7 +211,7 @@ def test_prd_first_provider_succeeds():
 
 def test_prd_falls_through_on_failure(monkeypatch, tmp_path):
     chain = [
-        {"type": "openai_compatible", "name": "deepseek", "url": "http://192.168.1.100:8888/v1", "model": "ds"},
+        {"type": "openai_compatible", "name": "deepseek", "url": "http://192.168.1.127:8888/v1", "model": "ds"},
         {"type": "openai", "name": "openai", "model": "gpt-4o"},
     ]
     fail = MagicMock()
@@ -233,7 +233,7 @@ def test_prd_falls_through_on_failure(monkeypatch, tmp_path):
 
 def test_prd_returns_none_when_all_fail():
     chain = [
-        {"type": "openai_compatible", "name": "ds", "url": "http://192.168.1.100:8888/v1", "model": "ds"},
+        {"type": "openai_compatible", "name": "ds", "url": "http://192.168.1.127:8888/v1", "model": "ds"},
     ]
     fail = MagicMock()
     fail.raise_for_status.side_effect = requests.RequestException("network")

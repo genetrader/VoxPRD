@@ -13,7 +13,7 @@ local -> OpenAI).
 
 State is split:
   - Source (committed): this file, config.json, prompts.py, providers.py,
-    secrets.py, .gitignore.
+    appsecrets.py, .gitignore.
   - Secrets (gitignored): secrets/.env (preferred) or ./.env (legacy).
   - Runtime state (gitignored): state/recordings/, state/last_*.txt,
     state/prd_*.txt, state/voice_hotkey_errors.log.
@@ -58,7 +58,7 @@ from PIL import Image, ImageDraw
 
 from providers import generate_prd, transcribe_with_retry
 from prompts import PRD_SYSTEM_PROMPT
-from secrets import get as get_secret, get_required
+from appsecrets import get as get_secret, get_required
 
 # ---------------------------------------------------------------------------
 # Paths (absolute — works from any cwd)

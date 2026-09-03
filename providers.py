@@ -31,7 +31,7 @@ from typing import Callable
 import requests
 
 from prompts import PRD_SYSTEM_PROMPT
-from secrets import get as get_secret
+from appsecrets import get as get_secret
 
 
 # ---------------------------------------------------------------------------

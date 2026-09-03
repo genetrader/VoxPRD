@@ -15,8 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import secrets as sec
-from secrets import get, get_required, load_env
+import appsecrets as sec
+from appsecrets import get, get_required, load_env
 
 
 @pytest.fixture
