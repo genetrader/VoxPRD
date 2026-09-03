@@ -1527,33 +1527,92 @@ class Recorder:
 
 
 # ---------------------------------------------------------------------------
-# Audio cues
+# Audio cues (selectable tone presets)
 # ---------------------------------------------------------------------------
-def _play_tone(freq: float = 800, duration: float = 0.15, volume: float = 0.3) -> None:
+# Note tuple: (freq_hz, duration_s, volume, offset_s, attack_s, harmonic,
+#              release_fraction). Presets render into one buffer so notes
+# can overlap (chimes) instead of cutting each other off.
+_TONE_PRESETS: dict[str, dict[str, list[tuple]]] = {
+    "classic": {  # the original beeps
+        "start": [(600, 0.10, 0.25, 0.00, 0.01, 0.0, 0.12),
+                  (900, 0.15, 0.30, 0.15, 0.01, 0.0, 0.10)],
+        "stop":  [(900, 0.10, 0.25, 0.00, 0.01, 0.0, 0.12),
+                  (500, 0.20, 0.30, 0.15, 0.01, 0.0, 0.10)],
+    },
+    "chime": {  # soft bell arpeggio, up to start / down to stop
+        "start": [(523.25, 0.55, 0.16, 0.00, 0.05, 0.30, 0.55),
+                  (659.25, 0.55, 0.15, 0.13, 0.05, 0.30, 0.55),
+                  (783.99, 0.75, 0.14, 0.26, 0.05, 0.30, 0.60)],
+        "stop":  [(783.99, 0.50, 0.15, 0.00, 0.05, 0.30, 0.55),
+                  (659.25, 0.50, 0.14, 0.12, 0.05, 0.30, 0.55),
+                  (523.25, 0.75, 0.13, 0.24, 0.05, 0.30, 0.60)],
+    },
+    "hum": {  # warm, low, unhurried
+        "start": [(440.00, 0.60, 0.20, 0.00, 0.09, 0.35, 0.60),
+                  (554.37, 0.65, 0.16, 0.20, 0.09, 0.35, 0.60)],
+        "stop":  [(554.37, 0.50, 0.18, 0.00, 0.09, 0.35, 0.60),
+                  (440.00, 0.80, 0.16, 0.16, 0.09, 0.35, 0.65)],
+    },
+    "bloom": {  # gentle swell, rising to start / falling to stop
+        "start": [(392.00, 0.85, 0.16, 0.00, 0.35, 0.20, 0.55),
+                  (523.25, 0.95, 0.14, 0.28, 0.35, 0.20, 0.55)],
+        "stop":  [(523.25, 0.75, 0.16, 0.00, 0.30, 0.20, 0.55),
+                  (392.00, 1.05, 0.14, 0.24, 0.30, 0.20, 0.60)],
+    },
+    "zen": {  # single low bell
+        "start": [(329.63, 1.20, 0.18, 0.00, 0.02, 0.40, 0.70)],
+        "stop":  [(261.63, 1.40, 0.16, 0.00, 0.02, 0.40, 0.70)],
+    },
+}
+
+_TONE_NAMES = {
+    "classic": "Classic",
+    "chime": "Chime",
+    "hum": "Warm Hum",
+    "bloom": "Bloom",
+    "zen": "Zen Bell",
+}
+_DISPLAY_TO_TONE = {v: k for k, v in _TONE_NAMES.items()}
+
+
+def _play_tone_set(kind: str, name: str | None = None) -> None:
+    """Render one preset's notes into a single buffer and play it.
+
+    kind: 'start' or 'stop'. name overrides the config lookup (Preview).
+    """
     try:
+        key = name or str(CONFIG.get(f"{kind}_tone", "classic"))
+        preset = _TONE_PRESETS.get(key) or _TONE_PRESETS["classic"]
+        notes = preset[kind]
         sr = 44100
-        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-        tone = (volume * np.sin(2 * np.pi * freq * t)).astype(np.float32)
-        fade = int(sr * 0.01)
-        tone[:fade] *= np.linspace(0, 1, fade).astype(np.float32)
-        tone[-fade:] *= np.linspace(1, 0, fade).astype(np.float32)
-        sd.play(tone, sr, blocking=False)
+        total = max(at + dur for (_f, dur, _v, at, _a, _h, _r) in notes) + 0.10
+        buf = np.zeros(int(sr * total), dtype=np.float32)
+        for freq, dur, vol, at, attack, harm, rel in notes:
+            n = int(sr * dur)
+            offs = int(sr * at)
+            t = np.linspace(0, dur, n, endpoint=False)
+            w = np.sin(2 * np.pi * freq * t) + harm * np.sin(4 * np.pi * freq * t)
+            w = vol * (w / (1.0 + harm))
+            env = np.ones(n, dtype=np.float32)
+            a = max(1, int(sr * min(attack, dur / 3)))
+            r = max(1, int(n * rel))
+            env[:a] = np.linspace(0, 1, a, dtype=np.float32)
+            env[-r:] *= np.linspace(1, 0, r, dtype=np.float32)
+            buf[offs:offs + n] += (w * env).astype(np.float32)
+        peak = float(np.max(np.abs(buf)))
+        if peak > 0.9:
+            buf *= 0.9 / peak
+        sd.play(buf, sr, blocking=False)
     except Exception:
         pass
 
 
 def _play_start_tone() -> None:
-    threading.Thread(
-        target=lambda: (_play_tone(600, 0.1, 0.25), time.sleep(0.05), _play_tone(900, 0.15, 0.3)),
-        daemon=True,
-    ).start()
+    threading.Thread(target=lambda: _play_tone_set("start"), daemon=True).start()
 
 
 def _play_stop_tone() -> None:
-    threading.Thread(
-        target=lambda: (_play_tone(900, 0.1, 0.25), time.sleep(0.05), _play_tone(500, 0.2, 0.3)),
-        daemon=True,
-    ).start()
+    threading.Thread(target=lambda: _play_tone_set("stop"), daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -2183,6 +2242,10 @@ def main() -> None:
                 timeout_var.set(str(int(CONFIG.get("overlay_timeout", 60))))
             except (TypeError, ValueError):
                 timeout_var.set("60")
+            start_tone_var.set(_TONE_NAMES.get(
+                str(CONFIG.get("start_tone", "classic")), "Classic"))
+            stop_tone_var.set(_TONE_NAMES.get(
+                str(CONFIG.get("stop_tone", "classic")), "Classic"))
 
         def _save() -> None:
             global CONFIG
@@ -2196,6 +2259,8 @@ def main() -> None:
                     CONFIG["overlay_timeout"] = int(timeout_var.get() or 0)
                 except ValueError:
                     CONFIG["overlay_timeout"] = 60
+                CONFIG["start_tone"] = _DISPLAY_TO_TONE.get(start_tone_var.get(), "classic")
+                CONFIG["stop_tone"] = _DISPLAY_TO_TONE.get(stop_tone_var.get(), "classic")
                 CONFIG_PATH.write_text(
                     json.dumps(CONFIG, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8",
@@ -2260,6 +2325,35 @@ def main() -> None:
                     textvariable=timeout_var).pack(side="left", padx=8)
         tk.Label(trow, text="seconds  (0 = keep open)", font=("Segoe UI", 9),
                  fg="#A6ADC8", bg="#1E1E2E").pack(side="left")
+
+        start_tone_var = tk.StringVar(value="Classic")
+        stop_tone_var = tk.StringVar(value="Classic")
+
+        def _preview(kind: str) -> None:
+            var = start_tone_var if kind == "start" else stop_tone_var
+            _play_tone_set(kind, _DISPLAY_TO_TONE.get(var.get(), "classic"))
+
+        srow = tk.Frame(frame, bg="#1E1E2E")
+        srow.pack(fill="x", pady=(10, 0))
+        tk.Label(srow, text="Start tone:", font=("Segoe UI", 10),
+                 fg="#CDD6F4", bg="#1E1E2E").pack(side="left", padx=(0, 6))
+        ttk.Combobox(srow, state="readonly", width=12, textvariable=start_tone_var,
+                     values=list(_TONE_NAMES.values())).pack(side="left", padx=(0, 6))
+        tk.Button(srow, text="▶ Preview", font=("Segoe UI", 9, "bold"),
+                  fg="#1E1E2E", bg="#89B4FA", activebackground="#B4D0FB",
+                  relief="flat", padx=10, pady=2,
+                  command=lambda: _preview("start")).pack(side="left")
+
+        erow = tk.Frame(frame, bg="#1E1E2E")
+        erow.pack(fill="x", pady=(6, 0))
+        tk.Label(erow, text="End tone:", font=("Segoe UI", 10),
+                 fg="#CDD6F4", bg="#1E1E2E").pack(side="left", padx=(0, 8))
+        ttk.Combobox(erow, state="readonly", width=12, textvariable=stop_tone_var,
+                     values=list(_TONE_NAMES.values())).pack(side="left", padx=(0, 6))
+        tk.Button(erow, text="▶ Preview", font=("Segoe UI", 9, "bold"),
+                  fg="#1E1E2E", bg="#89B4FA", activebackground="#B4D0FB",
+                  relief="flat", padx=10, pady=2,
+                  command=lambda: _preview("stop")).pack(side="left")
 
         btns = tk.Frame(frame, bg="#1E1E2E")
         btns.pack(fill="x", pady=(12, 0))
