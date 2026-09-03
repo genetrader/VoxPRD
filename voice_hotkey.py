@@ -64,6 +64,7 @@ from secrets import get as get_secret, get_required
 # Paths (absolute — works from any cwd)
 # ---------------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parent
+APP_VERSION = "1.0.0"
 SECRETS_DIR = APP_DIR / "secrets"
 STATE_DIR = APP_DIR / "state"
 RECORDINGS_DIR = STATE_DIR / "recordings"
@@ -255,7 +256,7 @@ def route_message(text: str) -> dict:
 def discord_headers() -> dict:
     return {
         "Authorization": f"Bot {BOT_TOKEN or ''}",
-        "User-Agent": "VoiceHotkey/1.1",
+        "User-Agent": f"VoxPRD/{APP_VERSION}",
     }
 
 
