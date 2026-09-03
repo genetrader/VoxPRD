@@ -120,12 +120,3 @@ Intent is a personal creative-writing tool with character-arc
 tracking. Suggests Obsidian-plugin or local-only web app as
 deployment. Skips enterprise features the user didn't ask for.
 """
-
-
-# ---------------------------------------------------------------------------
-# Routing / channel classification (used by tests; live code uses keyword match)
-# ---------------------------------------------------------------------------
-
-ROUTING_SYSTEM_PROMPT = """You classify a voice transcription into the
-right Discord channel based on intent. Reply with ONLY the channel name
-from the allowed list, nothing else. If none fit, reply with 'default'."""

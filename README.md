@@ -141,20 +141,13 @@ For auto-start at login: `Win+R` → `shell:startup` → paste a shortcut to
       { "type": "openai_compatible", "name": "my-llm", "url": "http://YOUR_LLM_HOST:8000/v1", "model": "YOUR_MODEL", "timeout": 300, "max_tokens": 16384, "temperature": 0.3 },
       { "type": "openai", "name": "openai-cloud", "model": "gpt-4o", "timeout": 300, "max_tokens": 16384 }
     ]
-  },
-
-  "routing_rules": [
-    { "name": "coding", "keywords": ["build", "fix", "deploy", "server"] },
-    { "name": "writing", "keywords": ["story", "script", "scene"] }
-  ],
-  "default_channel": { "name": "general" }
+  }
 }
 ```
 
-Routing is **first-match-wins**; it only labels memos today. If `url` is
-on a private network (RFC1918), no API key is required for `fleet`
-providers. Keep `max_tokens` generous (16k) — reasoning models spend much
-of the budget on invisible thinking before writing.
+If `url` is on a private network (RFC1918), no API key is required for
+`fleet` providers. Keep `max_tokens` generous (16k) — reasoning models
+spend much of the budget on invisible thinking before writing.
 
 ## Speech-to-text engines
 

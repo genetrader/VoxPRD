@@ -147,33 +147,8 @@ except Exception as _e:
 # ---------------------------------------------------------------------------
 # Secrets
 # ---------------------------------------------------------------------------
-def _read_bot_token() -> str | None:
-    # Archived 2026-09-03: the Discord relay existed to reach agents on a
-    # different machine. The agents now run locally, so no token is loaded
-    # and send_to_discord() is never called. secrets/.env may still contain
-    # DISCORD_BOT_TOKEN — it is ignored (safe to delete that line).
-    return None
-
-
-BOT_TOKEN = _read_bot_token()  # None is OK — webhook may still work
-DISCORD_API = "https://discord.com/api/v10"
-
-
-def _load_webhook_url() -> str | None:
-    webhook_file = APP_DIR / "webhooks.json"
-    if not webhook_file.exists():
-        return None
-    try:
-        data = json.loads(webhook_file.read_text(encoding="utf-8"))
-        url = data.get("general")
-        return url if isinstance(url, str) and url else None
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-WEBHOOK_URL = None  # Discord relay archived 2026-09-03 — webhooks.json ignored (see _read_bot_token)
-
-
+# Discord relay fully removed 2026-09-03 (was: route memos to channels for
+# agents on another machine). Only OPENAI_API_KEY is used, as cloud fallback.
 def get_openai_key() -> str:
     return get_secret("OPENAI_API_KEY") or ""
 
@@ -231,95 +206,6 @@ def rotate_prd_archive_if_needed() -> None:
             except OSError: pass
     except OSError:
         pass
-
-
-# ---------------------------------------------------------------------------
-# Channel routing
-# ---------------------------------------------------------------------------
-def route_message(text: str) -> dict:
-    """Return the matching rule dict, or default_channel if none match.
-
-    First-match-wins. The config comment in config.json.template says so;
-    keep this in sync if you change the rules engine.
-    """
-    text_lower = text.lower()
-    for rule in CONFIG.get("routing_rules", []):
-        for kw in rule.get("keywords", []):
-            if kw.lower() in text_lower:
-                return rule
-    return CONFIG["default_channel"]
-
-
-# ---------------------------------------------------------------------------
-# Discord send
-# ---------------------------------------------------------------------------
-def discord_headers() -> dict:
-    return {
-        "Authorization": f"Bot {BOT_TOKEN or ''}",
-        "User-Agent": f"VoxPRD/{APP_VERSION}",
-    }
-
-
-def _format_memo(text: str) -> str:
-    return f"**Voice memo** ({len(text.split())} words):\n> {text}"
-
-
-def send_to_discord(channel_id: str, text: str, audio_path: str | None = None,
-                    target_agent: str | None = None) -> bool:
-    """Send a message (with optional audio attachment) to a Discord channel.
-
-    Prefers webhook (so the message appears from 'VoxPRD Voice' instead of
-    the bot itself, which makes downstream agents actually respond to it).
-    Falls back to bot token if no webhook configured.
-
-    `target_agent` is included in the Discord content so the receiving agent
-    can route based on intent (bastion, screenplay, fleet, general, ...).
-    """
-    if not BOT_TOKEN and not WEBHOOK_URL:
-        notify("No Discord credentials — copied to clipboard instead", "Voice Hotkey")
-        try:
-            _copy_to_clipboard(text)
-        except Exception:
-            pass
-        return False
-
-    formatted = _format_memo(text)
-    if target_agent and target_agent != "general":
-        formatted = f"@`{target_agent}` {formatted}"
-
-    if WEBHOOK_URL:
-        try:
-            if audio_path and os.path.isfile(audio_path):
-                with open(audio_path, "rb") as af:
-                    files = {"file": ("voice_memo.wav", af, "audio/wav")}
-                    data = {"content": formatted, "username": "VoxPRD Voice"}
-                    resp = requests.post(WEBHOOK_URL, data=data, files=files, timeout=30)
-            else:
-                resp = requests.post(
-                    WEBHOOK_URL,
-                    json={"content": formatted, "username": "VoxPRD Voice"},
-                    timeout=15,
-                )
-            resp.raise_for_status()
-            return True
-        except requests.RequestException as e:
-            notify(f"Webhook error, falling back to bot: {e}", "Voice Hotkey")
-
-    url = f"{DISCORD_API}/channels/{channel_id}/messages"
-    payload = {"content": formatted}
-    try:
-        if audio_path and os.path.isfile(audio_path):
-            with open(audio_path, "rb") as af:
-                files = {"file": ("voice_memo.wav", af, "audio/wav")}
-                data = {"payload_json": json.dumps(payload)}
-                resp = requests.post(url, headers=discord_headers(), data=data, files=files, timeout=30)
-        else:
-            resp = requests.post(url, headers=discord_headers(), json=payload, timeout=15)
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        notify(f"Discord error: {e}", "Voice Hotkey Error")
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +681,7 @@ class SendCopyOverlay:
                  font=("Segoe UI", 11, "bold"), fg="#CDD6F4", bg="#1E1E2E",
                  anchor="w")
         self._title_label.pack(fill="x")
-        self._channel_var = tk.StringVar(value="→ general")
+        self._channel_var = tk.StringVar(value="")
         self._channel_label = tk.Label(self._frame, textvariable=self._channel_var,
                  font=("Segoe UI", 9), fg="#89B4FA", bg="#1E1E2E",
                  anchor="w")
@@ -961,13 +847,13 @@ class SendCopyOverlay:
         except Exception:
             pass
 
-    def prompt(self, text: str, channel_name: str) -> str:
-        """Show overlay; block until the user clicks a button (or auto-send)."""
+    def prompt(self, text: str) -> str:
+        """Show overlay; block until the user clicks a button (or auto-copy)."""
         self._result = None
         self._result_event.clear()
         if not self._root:
-            return "send"
-        _ui.run(lambda: self._do_show(text, channel_name, self._auto_send_timeout))
+            return "copy"
+        _ui.run(lambda: self._do_show(text, self._auto_send_timeout))
         # Block until user clicks (or auto-copy fires)
         if self._auto_send_timeout > 0:
             self._result_event.wait(timeout=self._auto_send_timeout + 2)
@@ -978,7 +864,7 @@ class SendCopyOverlay:
             self._result_event.wait()
         return self._result or "copy"
 
-    def _do_show(self, text: str, channel_name: str, timeout: int):
+    def _do_show(self, text: str, timeout: int):
         if not self._root: return
         self._reset_theme()
         self._preview_text.config(state="normal")
@@ -987,7 +873,7 @@ class SendCopyOverlay:
         self._preview_text.config(state="disabled")
         line_count = min(8, max(3, len(text) // 60 + 1))
         self._preview_text.config(height=line_count)
-        self._channel_var.set(f"→ {channel_name}")
+        self._channel_var.set("")  # routing labels removed; PRD states set their own
         self._root.update_idletasks()
         w = max(self._root.winfo_reqwidth(), 320)
         h = self._root.winfo_reqheight()
@@ -1414,43 +1300,30 @@ class Recorder:
             notify("No transcription text", "Voice Hotkey")
             return
 
-        rule = route_message(text)
-        channel_id = rule.get("channel_id", "")
-        channel_name = rule.get("name", "general")
-        target_agent = rule.get("target_agent", channel_name)
-
         if _send_copy_overlay is None:
             notify("UI not ready yet — try again in a moment", "Voice Hotkey")
             return
 
-        choice = _send_copy_overlay.prompt(text, channel_name)
+        choice = _send_copy_overlay.prompt(text)
 
         if choice == "dismiss":
-            return
-        if choice == "copy":
-            try:
-                _copy_to_clipboard(text)
-                notify(f"Copied! Backup: {LAST_TRANSCRIPTION_PATH.name}", "Voice Hotkey")
-            except Exception as e:
-                notify(f"Copy failed: {e}", "Voice Hotkey Error")
             return
         if choice == "prd":
             threading.Thread(
                 target=self._run_prd_flow,
-                args=(text, channel_id, channel_name, target_agent, audio_path),
+                args=(text, audio_path),
                 daemon=True,
             ).start()
             return
 
-        # Default: copy (Discord send archived 2026-09-03 — agents are local)
+        # Default: copy
         try:
             _copy_to_clipboard(text)
             notify(f"Copied! Backup: {LAST_TRANSCRIPTION_PATH.name}", "Voice Hotkey")
         except Exception as e:
             notify(f"Copy failed: {e}", "Voice Hotkey Error")
 
-    def _run_prd_flow(self, text: str, channel_id: str, channel_name: str,
-                      target_agent: str, audio_path: str | None) -> None:
+    def _run_prd_flow(self, text: str, audio_path: str | None = None) -> None:
         chain = [dict(c) for c in CONFIG.get("prd", {}).get("providers", [])]
         if not chain:
             notify("No PRD providers configured", "Voice Hotkey Error")
@@ -1492,38 +1365,6 @@ class Recorder:
         else:
             notify(f"PRD ready (via {prd_result.provider}, {prd_result.duration_s:.0f}s)",
                    "Voice Hotkey", timeout=4)
-
-        # If the PRD was for a Discord-routed topic, optionally post the markdown to the channel
-        if CONFIG.get("prd_auto_post_to_channel", False):
-            ok = send_to_discord(
-                channel_id, prd_text,
-                audio_path=None,
-                target_agent=target_agent,
-            )
-            if ok:
-                notify(f"PRD also posted to #{channel_name}", "Voice Hotkey")
-
-    def _push_to_scaffolding_daemon(self, text: str, channel_id: str,
-                                    channel_name: str, target_agent: str) -> None:
-        """Best-effort direct push to the local Bastion daemon.
-
-        Skipped if daemon is down; the daemon's own poll cycle will catch up.
-        """
-        url = CONFIG.get("scaffolding_daemon_url", "http://127.0.0.1:8097/api/voice-memo")
-        try:
-            requests.post(
-                url,
-                json={
-                    "transcription": text,
-                    "msg_id": "direct-push",
-                    "channel_id": channel_id,
-                    "channel_name": channel_name,
-                    "target_agent": target_agent,
-                },
-                timeout=3,
-            )
-        except requests.RequestException as e:
-            log_error(f"Scaffolding daemon push failed (will retry on poll): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1834,7 +1675,7 @@ def main() -> None:
             return
         threading.Thread(
             target=recorder._run_prd_flow,
-            args=(text, "", "general", "general", None),
+            args=(text, None),
             daemon=True,
         ).start()
 
