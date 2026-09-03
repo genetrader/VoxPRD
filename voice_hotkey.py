@@ -776,6 +776,8 @@ class SendCopyOverlay:
         self._auto_send_timeout = int(auto_send_timeout)
         self._prd_done = False
         self._prd_text = ""
+        self._timeout_id: str | None = None
+        self._generating = False
         _ui.run(self._build)
         self._ready.wait(timeout=5)
 
@@ -866,6 +868,9 @@ class SendCopyOverlay:
             if self._countdown_id:
                 self._root.after_cancel(self._countdown_id)
                 self._countdown_id = None
+            if self._timeout_id:
+                self._root.after_cancel(self._timeout_id)
+                self._timeout_id = None
             self._result_event.set()
             _ui.run(lambda: self._show_generating())
             return
@@ -873,11 +878,15 @@ class SendCopyOverlay:
         if self._countdown_id:
             self._root.after_cancel(self._countdown_id)
             self._countdown_id = None
+        if self._timeout_id:
+            self._root.after_cancel(self._timeout_id)
+            self._timeout_id = None
         self._result_event.set()
         self._hide()
 
     def _show_generating(self):
         if not self._root: return
+        self._generating = True
         self._preview_text.config(state="normal")
         self._preview_text.delete("1.0", "end")
         self._preview_text.insert(
@@ -990,6 +999,29 @@ class SendCopyOverlay:
         self._root.attributes("-alpha", 0.95)
         if timeout > 0:
             self._start_countdown(timeout)
+        # Optional self-close: the transcription is already on the
+        # clipboard and in state/last_transcription.txt, so the popup can
+        # safely vanish. Never fires during PRD generating/done states.
+        self._generating = False
+        if self._timeout_id:
+            self._root.after_cancel(self._timeout_id)
+            self._timeout_id = None
+        try:
+            close_secs = int(CONFIG.get("overlay_timeout", 60))
+        except (TypeError, ValueError):
+            close_secs = 60
+        if close_secs > 0:
+            self._timeout_id = self._root.after(
+                close_secs * 1000, self._timeout_dismiss)
+
+    def _timeout_dismiss(self):
+        self._timeout_id = None
+        if self._prd_done or self._generating:
+            return
+        if self._result is None:
+            self._result = "dismiss"
+            self._result_event.set()
+        self._hide()
 
     def _start_countdown(self, seconds: int):
         if not self._root: return
@@ -2143,6 +2175,10 @@ def main() -> None:
             copy_var.set(bool(CONFIG.get("auto_copy_to_clipboard", False)))
             paste_var.set(bool(CONFIG.get("auto_paste_to_field", False)))
             prd_var.set(bool(CONFIG.get("prd_auto_copy_to_clipboard", True)))
+            try:
+                timeout_var.set(str(int(CONFIG.get("overlay_timeout", 60))))
+            except (TypeError, ValueError):
+                timeout_var.set("60")
 
         def _save() -> None:
             global CONFIG
@@ -2151,6 +2187,10 @@ def main() -> None:
                 CONFIG["auto_copy_to_clipboard"] = bool(copy_var.get())
                 CONFIG["auto_paste_to_field"] = bool(paste_var.get())
                 CONFIG["prd_auto_copy_to_clipboard"] = bool(prd_var.get())
+                try:
+                    CONFIG["overlay_timeout"] = int(timeout_var.get() or 0)
+                except ValueError:
+                    CONFIG["overlay_timeout"] = 60
                 CONFIG_PATH.write_text(
                     json.dumps(CONFIG, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8",
@@ -2202,6 +2242,16 @@ def main() -> None:
              "Also pastes it wherever your cursor is — chat box, editor, browser…")
         _chk(prd_var, "Auto-copy finished PRDs",
              "PRD output goes to the clipboard when it completes.")
+
+        timeout_var = tk.StringVar(value="60")
+        trow = tk.Frame(frame, bg="#1E1E2E")
+        trow.pack(fill="x", pady=(10, 0))
+        tk.Label(trow, text="Close the memo popup after", font=("Segoe UI", 10),
+                 fg="#CDD6F4", bg="#1E1E2E").pack(side="left")
+        ttk.Spinbox(trow, from_=0, to=600, increment=15, width=5,
+                    textvariable=timeout_var).pack(side="left", padx=8)
+        tk.Label(trow, text="seconds  (0 = keep open)", font=("Segoe UI", 9),
+                 fg="#A6ADC8", bg="#1E1E2E").pack(side="left")
 
         btns = tk.Frame(frame, bg="#1E1E2E")
         btns.pack(fill="x", pady=(12, 0))
@@ -2397,17 +2447,20 @@ def main() -> None:
     threading.Thread(target=_stt_health_loop, daemon=True).start()
 
     hotkey_label = hotkey_display(CONFIG.get("hotkey", "ctrl+alt+v"))
+    settings_menu = pystray.Menu(
+        pystray.MenuItem("Options…", on_open_settings),
+        pystray.MenuItem("Change Hotkey…", on_change_hotkey),
+        pystray.MenuItem("STT Endpoint & Model…", on_stt_settings),
+        pystray.MenuItem("LLM Endpoint & Model…", on_llm_settings),
+        pystray.MenuItem("Edit PRD Prompt…", on_edit_prd_prompt),
+        pystray.MenuItem("Reload Config", on_reload_config),
+    )
     menu = pystray.Menu(
         pystray.MenuItem(f"Voice Hotkey ({hotkey_label})", None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Settings…", on_open_settings),
         pystray.MenuItem("Show Last Transcription", on_show_last, default=True),
         pystray.MenuItem("Last Transcription -> PRD", on_prd_from_last),
-        pystray.MenuItem("Change Hotkey…", on_change_hotkey),
-        pystray.MenuItem("Edit PRD Prompt…", on_edit_prd_prompt),
-        pystray.MenuItem("STT Endpoint & Model…", on_stt_settings),
-        pystray.MenuItem("LLM Endpoint & Model…", on_llm_settings),
-        pystray.MenuItem("Reload Config", on_reload_config),
+        pystray.MenuItem("Settings", settings_menu),
         pystray.MenuItem("Restart", on_restart),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
