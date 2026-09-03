@@ -557,6 +557,42 @@ def _probe_stt_primary() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Single Tk root — every window in the app is a Toplevel on it
+# ---------------------------------------------------------------------------
+# One Tcl interpreter, one UI thread. The old design (one tk.Tk() per
+# overlay/dialog, each on its own thread) corrupted Tcl process-global
+# state and crashed natively (ntdll 0xc0000005, 2026-09-03). Cross-thread
+# calls go through _ui.run(fn), which schedules fn on the UI thread.
+_ui: "UI | None" = None
+
+
+class UI:
+    """The app's one and only Tk root: hidden, owned by a daemon thread."""
+
+    def __init__(self):
+        self.root: tk.Tk | None = None
+        self._ready = threading.Event()
+        threading.Thread(target=self._thread, daemon=True).start()
+        self._ready.wait(timeout=5)
+
+    def _thread(self) -> None:
+        self.root = tk.Tk()
+        self.root.title("VoxPRD UI")
+        self.root.withdraw()
+        self._ready.set()
+        self.root.mainloop()
+
+    def run(self, fn) -> None:
+        """Schedule fn on the UI thread; safe from any thread, no-op if down."""
+        root = self.root
+        if root is not None:
+            try:
+                root.after(0, fn)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Notifications (custom overlay toast)
 # ---------------------------------------------------------------------------
 _notify_overlay: "NotificationOverlay | None" = None
@@ -568,12 +604,11 @@ class NotificationOverlay:
         self._title_var: tk.StringVar | None = None
         self._msg_var: tk.StringVar | None = None
         self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._run_tk, daemon=True)
-        self._thread.start()
+        _ui.run(self._build)
         self._ready.wait(timeout=5)
 
-    def _run_tk(self):
-        self._root = tk.Tk()
+    def _build(self):
+        self._root = tk.Toplevel(_ui.root)
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
         self._root.attributes("-alpha", 0.0)
@@ -591,12 +626,11 @@ class NotificationOverlay:
         self._root.update_idletasks()
         self._root.withdraw()
         self._ready.set()
-        self._root.mainloop()
 
     def show(self, title: str, message: str, timeout: int = 3):
         if not self._root:
             return
-        self._root.after(0, lambda: self._do_show(title, message, timeout))
+        _ui.run(lambda: self._do_show(title, message, timeout))
 
     def _do_show(self, title: str, message: str, timeout: int):
         if not self._root: return
@@ -639,6 +673,8 @@ class NotificationOverlay:
 
 def notify(message: str, title: str = "Voice Hotkey", timeout: int = 3) -> None:
     global _notify_overlay
+    if _ui is None:
+        return  # UI not started (tests import the module without main())
     if _notify_overlay is None:
         try:
             _notify_overlay = NotificationOverlay()
@@ -663,12 +699,11 @@ class SttWarningOverlay:
     def __init__(self):
         self._root: tk.Tk | None = None
         self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._run_tk, daemon=True)
-        self._thread.start()
+        _ui.run(self._build)
         self._ready.wait(timeout=5)
 
-    def _run_tk(self):
-        self._root = tk.Tk()
+    def _build(self):
+        self._root = tk.Toplevel(_ui.root)
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
         self._root.configure(bg="#7F1D1D")
@@ -694,19 +729,18 @@ class SttWarningOverlay:
         self._root.geometry(f"+{sw - w - 16}+{sh - h - 120}")
         self._root.withdraw()
         self._ready.set()
-        self._root.mainloop()
 
     def show(self):
         if self._root:
             try:
-                self._root.after(0, lambda: (self._root.deiconify(), self._root.lift()))
+                _ui.run(lambda: (self._root.deiconify(), self._root.lift()))
             except Exception:
                 pass
 
     def hide(self):
         if self._root:
             try:
-                self._root.after(0, self._root.withdraw)
+                _ui.run(self._root.withdraw)
             except Exception:
                 pass
 
@@ -741,12 +775,11 @@ class SendCopyOverlay:
         self._auto_send_timeout = int(auto_send_timeout)
         self._prd_done = False
         self._prd_text = ""
-        self._thread = threading.Thread(target=self._run_tk, daemon=True)
-        self._thread.start()
+        _ui.run(self._build)
         self._ready.wait(timeout=5)
 
-    def _run_tk(self):
-        self._root = tk.Tk()
+    def _build(self):
+        self._root = tk.Toplevel(_ui.root)
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
         self._root.attributes("-alpha", 0.0)
@@ -812,7 +845,6 @@ class SendCopyOverlay:
         self._root.update_idletasks()
         self._root.withdraw()
         self._ready.set()
-        self._root.mainloop()
 
     def _choose(self, choice: str):
         if self._prd_done:
@@ -834,7 +866,7 @@ class SendCopyOverlay:
                 self._root.after_cancel(self._countdown_id)
                 self._countdown_id = None
             self._result_event.set()
-            self._root.after(0, lambda: self._show_generating())
+            _ui.run(lambda: self._show_generating())
             return
         self._result = choice
         if self._countdown_id:
@@ -864,7 +896,7 @@ class SendCopyOverlay:
         a persistent visual 'done' cue. Copy then acts on the PRD text."""
         if not self._root:
             return
-        self._root.after(0, lambda: self._show_prd_result(text, info_line))
+        _ui.run(lambda: self._show_prd_result(text, info_line))
 
     def _show_prd_result(self, text: str, info_line: str) -> None:
         if not self._root:
@@ -912,7 +944,7 @@ class SendCopyOverlay:
     def _hide(self):
         if not self._root: return
         try:
-            self._root.after(0, lambda: (
+            _ui.run(lambda: (
                 self._root.attributes("-alpha", 0.0),
                 self._root.withdraw(),
             ))
@@ -925,7 +957,7 @@ class SendCopyOverlay:
         self._result_event.clear()
         if not self._root:
             return "send"
-        self._root.after(0, lambda: self._do_show(text, channel_name, self._auto_send_timeout))
+        _ui.run(lambda: self._do_show(text, channel_name, self._auto_send_timeout))
         # Block until user clicks (or auto-copy fires)
         if self._auto_send_timeout > 0:
             self._result_event.wait(timeout=self._auto_send_timeout + 2)
@@ -996,12 +1028,11 @@ class RecordingOverlay:
         self._start_overlay_thread()
 
     def _start_overlay_thread(self):
-        self._thread = threading.Thread(target=self._run_tk, daemon=True)
-        self._thread.start()
+        _ui.run(self._build)
         self._ready.wait(timeout=5)
 
-    def _run_tk(self):
-        self._root = tk.Tk()
+    def _build(self):
+        self._root = tk.Toplevel(_ui.root)
         self._root.title("")
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
@@ -1026,7 +1057,6 @@ class RecordingOverlay:
         self._root.geometry(f"+{screen_w - win_w - 20}+10")
         self._root.withdraw()
         self._ready.set()
-        self._root.mainloop()
 
     def push_amplitude(self, rms: float):
         try:
@@ -1076,7 +1106,7 @@ class RecordingOverlay:
     def show(self, text: str = "  ● REC  ", color: str = "#DC2626"):
         if self._root and self._label:
             try:
-                self._root.after(0, lambda: self._do_show(text, color))
+                _ui.run(lambda: self._do_show(text, color))
             except Exception:
                 pass
 
@@ -1099,7 +1129,7 @@ class RecordingOverlay:
     def hide(self):
         if self._root:
             try:
-                self._root.after(0, self._do_hide)
+                _ui.run(self._do_hide)
             except Exception:
                 pass
 
@@ -1637,8 +1667,9 @@ def _preload_whisper() -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    global _send_copy_overlay
+    global _send_copy_overlay, _ui
 
+    _ui = UI()  # single Tk root — every window below is a Toplevel on it
     recorder = Recorder()
     overlay = RecordingOverlay()
     recorder.set_overlay(overlay)
@@ -1832,7 +1863,7 @@ def main() -> None:
             _stop_listening()
             root.withdraw()
 
-        root = tk.Tk()
+        root = tk.Toplevel(_ui.root)
         root.title("Voice Hotkey — Choose Hotkey")
         root.configure(bg="#1E1E2E")
         root.attributes("-topmost", True)
@@ -1865,9 +1896,8 @@ def main() -> None:
         root.protocol("WM_DELETE_WINDOW", _close)
         root.withdraw()
         _poll_queue()
-        root.mainloop()
 
-    threading.Thread(target=_run_hotkey_picker, daemon=True).start()
+    _ui.run(_run_hotkey_picker)
 
     # --- PRD prompt editor + LLM endpoint picker (persistent overlays) ---
     def on_edit_prd_prompt(icon, item):
@@ -1921,7 +1951,7 @@ def main() -> None:
                 root.lift()
             root.after(80, _poll)
 
-        root = tk.Tk()
+        root = tk.Toplevel(_ui.root)
         root.title("Voice Hotkey — Edit PRD Prompt")
         root.configure(bg="#1E1E2E")
         root.attributes("-topmost", True)
@@ -1957,7 +1987,6 @@ def main() -> None:
         root.protocol("WM_DELETE_WINDOW", _close)
         root.withdraw()
         _poll()
-        root.mainloop()
 
     def _run_llm_settings() -> None:
         def _current_base() -> str:
@@ -2050,7 +2079,7 @@ def main() -> None:
                     status.config(text=f"Discovery failed: {payload[:80]}", fg="#F87171")
             root.after(80, _poll)
 
-        root = tk.Tk()
+        root = tk.Toplevel(_ui.root)
         root.title("Voice Hotkey — LLM Endpoint & Model")
         root.configure(bg="#1E1E2E")
         root.attributes("-topmost", True)
@@ -2098,10 +2127,9 @@ def main() -> None:
         root.protocol("WM_DELETE_WINDOW", _close)
         root.withdraw()
         _poll()
-        root.mainloop()
 
-    threading.Thread(target=_run_prd_prompt_editor, daemon=True).start()
-    threading.Thread(target=_run_llm_settings, daemon=True).start()
+    _ui.run(_run_prd_prompt_editor)
+    _ui.run(_run_llm_settings)
 
     # --- Settings dialog (checkbox options) ---
     def on_open_settings(icon, item):
@@ -2143,7 +2171,7 @@ def main() -> None:
                 root.lift()
             root.after(80, _poll)
 
-        root = tk.Tk()
+        root = tk.Toplevel(_ui.root)
         root.title("Voice Hotkey — Settings")
         root.configure(bg="#1E1E2E")
         root.attributes("-topmost", True)
@@ -2187,9 +2215,8 @@ def main() -> None:
         root.protocol("WM_DELETE_WINDOW", _close)
         root.withdraw()
         _poll()
-        root.mainloop()
 
-    threading.Thread(target=_run_settings_dialog, daemon=True).start()
+    _ui.run(_run_settings_dialog)
 
     # --- STT endpoint picker + health watch ---
     def on_stt_settings(icon, item):
@@ -2297,7 +2324,7 @@ def main() -> None:
                     stt_status.config(text=f"Discovery failed: {payload[:80]}", fg="#F87171")
             root.after(80, _poll)
 
-        root = tk.Tk()
+        root = tk.Toplevel(_ui.root)
         root.title("Voice Hotkey — STT Endpoint & Model")
         root.configure(bg="#1E1E2E")
         root.attributes("-topmost", True)
@@ -2345,9 +2372,8 @@ def main() -> None:
         root.protocol("WM_DELETE_WINDOW", _close)
         root.withdraw()
         _poll()
-        root.mainloop()
 
-    threading.Thread(target=_run_stt_settings, daemon=True).start()
+    _ui.run(_run_stt_settings)
 
     # Health watch: poll the primary STT endpoint; red icon + warning on death.
     _stt_last_state: list[bool] = [True]
