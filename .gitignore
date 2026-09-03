@@ -1,0 +1,75 @@
+# =============================================================================
+# Voice Hotkey — git ignore
+# =============================================================================
+# Generated runtime state, secrets, and tooling debris. Source-controlled
+# files (voice_hotkey.py, prompts.py, config.json.template, etc.) are NOT
+# in this list. If you fork the project, add /secrets/, /state/recordings/,
+# and last_*.txt to your own .gitignore.
+# =============================================================================
+
+# Secrets
+/secrets/
+/.env
+.env.local
+.env.*.local
+
+# Runtime state (recordings, last text dumps, prd archives, error log)
+/state/
+/recordings/
+/last_*.txt
+/prd_*.txt
+/voice_hotkey_errors.log
+/crash_capture.err
+/crash_capture.out
+
+# Webhook URL (intentionally kept locally, never committed)
+/webhooks.json
+/webhook_url.txt
+
+# Tooling
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS
+$RECYCLE.BIN/
+
+# Dev / one-off scripts
+/_archive/
+/_dev/
+/test_*.py
+!/tests/
+/*.zip
+/LastUsed.whisper
+
+# Logs
+*.log
+!/state/**/*.log
+
+# Backup / swap
+*.bak
+*.tmp
+
+# Active config holds personal endpoints/channel IDs — never publish
+/config.json
+/config.json.*

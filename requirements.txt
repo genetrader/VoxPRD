@@ -1,0 +1,8 @@
+pystray>=0.19
+Pillow>=10.0
+keyboard>=0.13
+mouse>=0.7
+sounddevice>=0.4
+soundfile>=0.12
+requests>=2.31
+openai-whisper>=20231117
