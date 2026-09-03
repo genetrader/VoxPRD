@@ -70,13 +70,13 @@ Google Remote Desktop (see hotkey notes).
   toasts on the change, and pressing the hotkey while it's down shows a
   dismissible "check your transcription configuration" panel.
 - **Settings submenu** — one place for configuration: *Options…*
-  (checkboxes for auto-copy, **auto-paste into the focused field**, PRD
-  auto-copy, and the memo popup's auto-close timeout — default 60s, 0 =
-  keep open), *Change Hotkey…*, *STT/LLM Endpoint & Model…*, *Edit PRD
-  Prompt…*, and *Reload Config*. The memo popup can safely close itself:
-  the text is already on the clipboard and saved to
-  `state/last_transcription.txt`; PRD generating/done states never
-  auto-close.
+  (checkboxes for auto-copy, **auto-paste into the focused field** with an
+  optional **Enter-after-paste** for chat boxes, PRD auto-copy, and the
+  memo popup's auto-close timeout — default 60s, 0 = keep open),
+  *Change Hotkey…*, *STT/LLM Endpoint & Model…*, *Edit PRD Prompt…*, and
+  *Reload Config*. The memo popup can safely close itself: the text is
+  already on the clipboard and saved to `state/last_transcription.txt`;
+  PRD generating/done states never auto-close.
 - **State split**: secrets in `secrets/`, runtime state in `state/`,
   source at the repo root.
 

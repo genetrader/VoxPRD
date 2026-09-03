@@ -1663,6 +1663,9 @@ def _auto_paste_after_copy() -> None:
                 ctypes.windll.user32.SetForegroundWindow(hwnd)
                 time.sleep(0.05)
             keyboard.send("ctrl+v")
+            if CONFIG.get("auto_paste_enter", False):
+                time.sleep(0.15)
+                keyboard.send("enter")
         except Exception as e:
             log_error(f"Auto-paste failed: {e}")
 
@@ -2174,6 +2177,7 @@ def main() -> None:
         def _load_from_config() -> None:
             copy_var.set(bool(CONFIG.get("auto_copy_to_clipboard", False)))
             paste_var.set(bool(CONFIG.get("auto_paste_to_field", False)))
+            enter_var.set(bool(CONFIG.get("auto_paste_enter", False)))
             prd_var.set(bool(CONFIG.get("prd_auto_copy_to_clipboard", True)))
             try:
                 timeout_var.set(str(int(CONFIG.get("overlay_timeout", 60))))
@@ -2186,6 +2190,7 @@ def main() -> None:
                 CONFIG = load_config()
                 CONFIG["auto_copy_to_clipboard"] = bool(copy_var.get())
                 CONFIG["auto_paste_to_field"] = bool(paste_var.get())
+                CONFIG["auto_paste_enter"] = bool(enter_var.get())
                 CONFIG["prd_auto_copy_to_clipboard"] = bool(prd_var.get())
                 try:
                     CONFIG["overlay_timeout"] = int(timeout_var.get() or 0)
@@ -2224,6 +2229,7 @@ def main() -> None:
 
         copy_var = tk.BooleanVar()
         paste_var = tk.BooleanVar()
+        enter_var = tk.BooleanVar()
         prd_var = tk.BooleanVar()
 
         def _chk(var: tk.BooleanVar, text: str, sub: str) -> None:
@@ -2240,6 +2246,8 @@ def main() -> None:
              "Every transcription lands on the clipboard immediately.")
         _chk(paste_var, "Auto-paste into the focused field",
              "Also pastes it wherever your cursor is — chat box, editor, browser…")
+        _chk(enter_var, "Press Enter after pasting",
+             "Sends a carriage return too — chat boxes send the message.")
         _chk(prd_var, "Auto-copy finished PRDs",
              "PRD output goes to the clipboard when it completes.")
 
