@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/voxprd.png" alt="VoxPRD — talk, it's on your clipboard (or a full PRD)" width="820">
+</p>
+
 # VoxPRD
 
 Local-first voice dictation for Windows. Press a global hotkey (or a mouse
