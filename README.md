@@ -27,6 +27,9 @@ Google Remote Desktop (see hotkey notes).
 ![Hotkey picker](docs/dialog-hotkey-picker.png)
 *Pick any key — or mouse button*
 
+![Settings](docs/dialog-settings.png)
+*Checkbox options — auto-copy, auto-paste, PRD copy*
+
 ![PRD prompt editor](docs/dialog-prd-prompt.png)
 *Edit the PRD prompt*
 
@@ -66,6 +69,10 @@ Google Remote Desktop (see hotkey notes).
   the tray icon **red** when the primary STT endpoint stops answering,
   toasts on the change, and pressing the hotkey while it's down shows a
   dismissible "check your transcription configuration" panel.
+- **Settings dialog** — tray → *Settings…*: checkboxes for auto-copy to
+  clipboard, **auto-paste into the focused field** (the transcription is
+  pasted straight into whatever your cursor is in — chat box, editor,
+  browser), and auto-copy of finished PRDs. Saved to `config.json`.
 - **State split**: secrets in `secrets/`, runtime state in `state/`,
   source at the repo root.
 

@@ -1299,6 +1299,8 @@ class Recorder:
                     copied = True
                 except Exception as e:
                     log_error(f"Auto-copy to clipboard failed: {e}")
+            if copied:
+                _auto_paste_after_copy()
 
             notify(
                 f"Transcribed via {result.provider} in {result.duration_s:.1f}s"
@@ -1577,6 +1579,31 @@ def _copy_to_clipboard_raw(text: str) -> None:
             kernel32.GlobalFree(h_mem)
     else:
         kernel32.GlobalFree(h_mem)
+
+
+def _auto_paste_after_copy() -> None:
+    """Optional: paste the just-copied transcription into whatever field
+    the user had focus in. The completion toast/overlay can steal focus in
+    between, so the original foreground window is captured first and
+    restored before sending Ctrl+V."""
+    if not CONFIG.get("auto_paste_to_field", False):
+        return
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        hwnd = 0
+
+    def _paste() -> None:
+        time.sleep(0.25)
+        try:
+            if hwnd and ctypes.windll.user32.GetForegroundWindow() != hwnd:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                time.sleep(0.05)
+            keyboard.send("ctrl+v")
+        except Exception as e:
+            log_error(f"Auto-paste failed: {e}")
+
+    threading.Thread(target=_paste, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -2076,6 +2103,94 @@ def main() -> None:
     threading.Thread(target=_run_prd_prompt_editor, daemon=True).start()
     threading.Thread(target=_run_llm_settings, daemon=True).start()
 
+    # --- Settings dialog (checkbox options) ---
+    def on_open_settings(icon, item):
+        settings_open[0] = True
+
+    settings_open: list[bool] = [False]
+
+    def _run_settings_dialog() -> None:
+        def _load_from_config() -> None:
+            copy_var.set(bool(CONFIG.get("auto_copy_to_clipboard", False)))
+            paste_var.set(bool(CONFIG.get("auto_paste_to_field", False)))
+            prd_var.set(bool(CONFIG.get("prd_auto_copy_to_clipboard", True)))
+
+        def _save() -> None:
+            global CONFIG
+            try:
+                CONFIG = load_config()
+                CONFIG["auto_copy_to_clipboard"] = bool(copy_var.get())
+                CONFIG["auto_paste_to_field"] = bool(paste_var.get())
+                CONFIG["prd_auto_copy_to_clipboard"] = bool(prd_var.get())
+                CONFIG_PATH.write_text(
+                    json.dumps(CONFIG, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                notify("Settings saved", "Voice Hotkey")
+                root.withdraw()
+            except (OSError, ValueError) as e:
+                log_error(f"Failed to save settings: {e}")
+                notify(f"Save failed: {e}", "Voice Hotkey Error")
+
+        def _close() -> None:
+            root.withdraw()
+
+        def _poll() -> None:
+            if settings_open[0]:
+                settings_open[0] = False
+                _load_from_config()
+                root.deiconify()
+                root.lift()
+            root.after(80, _poll)
+
+        root = tk.Tk()
+        root.title("Voice Hotkey — Settings")
+        root.configure(bg="#1E1E2E")
+        root.attributes("-topmost", True)
+        root.resizable(False, False)
+        frame = tk.Frame(root, bg="#1E1E2E", padx=18, pady=14)
+        frame.pack()
+        tk.Label(frame, text="Settings", font=("Segoe UI", 11, "bold"),
+                 fg="#CDD6F4", bg="#1E1E2E").pack(anchor="w", pady=(0, 8))
+
+        copy_var = tk.BooleanVar()
+        paste_var = tk.BooleanVar()
+        prd_var = tk.BooleanVar()
+
+        def _chk(var: tk.BooleanVar, text: str, sub: str) -> None:
+            box = tk.Frame(frame, bg="#1E1E2E")
+            box.pack(fill="x", pady=3)
+            tk.Checkbutton(box, variable=var, text=text, font=("Segoe UI", 10),
+                           fg="#CDD6F4", bg="#1E1E2E", activebackground="#1E1E2E",
+                           activeforeground="#CDD6F4", selectcolor="#2A2A3E",
+                           anchor="w").pack(anchor="w")
+            tk.Label(box, text=sub, font=("Segoe UI", 9), fg="#A6ADC8",
+                     bg="#1E1E2E", anchor="w").pack(anchor="w", padx=(26, 0))
+
+        _chk(copy_var, "Auto-copy transcription to clipboard",
+             "Every transcription lands on the clipboard immediately.")
+        _chk(paste_var, "Auto-paste into the focused field",
+             "Also pastes it wherever your cursor is — chat box, editor, browser…")
+        _chk(prd_var, "Auto-copy finished PRDs",
+             "PRD output goes to the clipboard when it completes.")
+
+        btns = tk.Frame(frame, bg="#1E1E2E")
+        btns.pack(fill="x", pady=(12, 0))
+        tk.Button(btns, text="Save", font=("Segoe UI", 10, "bold"),
+                  fg="#1E1E2E", bg="#A6E3A1", activebackground="#B8F0B0",
+                  relief="flat", padx=16, pady=4, command=_save,
+                  ).pack(side="left", padx=(0, 8))
+        tk.Button(btns, text="Close", font=("Segoe UI", 10, "bold"),
+                  fg="#CDD6F4", bg="#45475A", activebackground="#585B70",
+                  relief="flat", padx=12, pady=4, command=_close,
+                  ).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", _close)
+        root.withdraw()
+        _poll()
+        root.mainloop()
+
+    threading.Thread(target=_run_settings_dialog, daemon=True).start()
+
     # --- STT endpoint picker + health watch ---
     def on_stt_settings(icon, item):
         stt_open[0] = True
@@ -2258,6 +2373,7 @@ def main() -> None:
     menu = pystray.Menu(
         pystray.MenuItem(f"Voice Hotkey ({hotkey_label})", None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Settings…", on_open_settings),
         pystray.MenuItem("Show Last Transcription", on_show_last, default=True),
         pystray.MenuItem("Last Transcription -> PRD", on_prd_from_last),
         pystray.MenuItem("Change Hotkey…", on_change_hotkey),
