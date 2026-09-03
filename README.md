@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/voxprd.png" alt="VoxPRD — talk, it's on your clipboard (or a full PRD)" width="820">
+  <img src="docs/voxprd.png?v=1.1" alt="VoxPRD — talk, it's on your clipboard (or a full PRD)" width="820">
 </p>
 
 # VoxPRD
