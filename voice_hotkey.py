@@ -2723,6 +2723,8 @@ def main() -> None:
         pystray.MenuItem("LLM Endpoint & Model…", on_llm_settings),
         pystray.MenuItem("Edit PRD Prompt…", on_edit_prd_prompt),
         pystray.MenuItem("Reload Config", on_reload_config),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Built by your friend, Vibe Coding with Gene", on_credit),
     )
     menu = pystray.Menu(
         pystray.MenuItem(f"Voice Hotkey ({hotkey_label})", None, enabled=False),
@@ -2733,7 +2735,6 @@ def main() -> None:
         pystray.MenuItem("Restart", on_restart),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
-        pystray.MenuItem("Built by your friend, Vibe Coding with Gene", on_credit),
     )
 
     icon = pystray.Icon(
