@@ -120,6 +120,11 @@ For auto-start at login: `Win+R` → `shell:startup` → paste a shortcut to
   "abort_hotkey": "pause",
   "auto_send_timeout": 0,                // 0 = wait for click; N = auto-copy after Ns
   "auto_copy_to_clipboard": true,        // transcription goes on the clipboard immediately
+  "auto_paste_to_field": false,          // paste into whatever field you're focused in
+  "auto_paste_enter": false,             // ...and press Enter after pasting (chat boxes)
+  "overlay_timeout": 60,                 // memo popup auto-closes after Ns (0 = keep open)
+  "start_tone": "classic",               // classic | chime | hum | bloom | zen
+  "stop_tone": "classic",
   "prd_prompt": null,                    // custom PRD system prompt (tray → Edit PRD Prompt…)
   "prd_auto_copy_to_clipboard": true,    // finished PRDs go straight to the clipboard
 
