@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import webbrowser
 import threading
 import time
 from dataclasses import dataclass
@@ -1749,6 +1750,12 @@ def main() -> None:
         keyboard.unhook_all()
         icon.stop()
 
+    def on_credit(icon, item):
+        try:
+            webbrowser.open("https://x.com/with_gene2626")
+        except Exception:
+            pass
+
     def on_restart(icon, item):
         """Kill this process and let start-hidden.vbs respawn a fresh one.
 
@@ -2720,6 +2727,7 @@ def main() -> None:
         pystray.MenuItem("Restart", on_restart),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
+        pystray.MenuItem("Built by your friend, Vibe Coding with Gene", on_credit),
     )
 
     icon = pystray.Icon(
