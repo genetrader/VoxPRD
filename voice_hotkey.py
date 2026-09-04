@@ -2894,6 +2894,17 @@ def main() -> None:
     WM_SYSKEYDOWN = 0x0104
 
     # --- Route palette (opened by the router hotkey) -----------------------
+    _palette: list[tk.Toplevel | None] = [None]
+
+    def _close_palette(cancel: bool = False) -> None:
+        pal = _palette[0]
+        if pal is not None:
+            _palette[0] = None
+            try:
+                pal.destroy()
+            except Exception:
+                pass
+
     def _open_route_palette() -> None:
         entries: list[tuple[str, dict | None]] = [
             (f"{r.get('name', '?')}  ·  {r.get('mode', '')}", r)
@@ -2918,6 +2929,7 @@ def main() -> None:
             if done[0]:
                 return
             done[0] = True
+            _palette[0] = None
             _armed_route[0] = route
             try:
                 pal.destroy()
@@ -2945,6 +2957,7 @@ def main() -> None:
             if done[0]:
                 return
             done[0] = True
+            _palette[0] = None
             try:
                 pal.destroy()
             except Exception:
@@ -2966,6 +2979,8 @@ def main() -> None:
         except (TypeError, ValueError):
             pal_secs = 20
         pal.after(max(3, pal_secs) * 1000, cancel)
+        pal.protocol("WM_DELETE_WINDOW", cancel)
+        _palette[0] = pal
         pal.deiconify()
         pal.lift()
         pal.focus_force()
@@ -3055,7 +3070,9 @@ def main() -> None:
                 recorder.abort()
                 return
             if route == _ROUTER:
-                if not recorder.is_recording:
+                if _palette[0] is not None:
+                    _ui.run(lambda: _close_palette(cancel=True))
+                elif not recorder.is_recording:
                     _ui.run(_open_route_palette)
                 return
             _armed_route[0] = route
@@ -3131,35 +3148,67 @@ def main() -> None:
             timeout=4,
         )
 
-    # --- Mouse-button trigger (global hook via the `mouse` package) ---
-    _last_mouse_evt: list[float] = [0.0]
+    # --- Mouse-button trigger: our OWN low-level mouse hook ----------------
+    # The `mouse` package hook cannot suppress events, so a trigger button
+    # (e.g. middle) would ALSO reach other tray apps. WH_MOUSE_LL lets us
+    # swallow trigger buttons so VoxPRD exclusively owns them. The package
+    # hook remains only as a fallback if the LL hook fails to install.
+    _MSLL = None
+    if ctypes:
+        class _MSLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("pt", ctypes.wintypes.POINT),
+                ("mouseData", ctypes.wintypes.DWORD),
+                ("flags", ctypes.wintypes.DWORD),
+                ("time", ctypes.wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+        _MSLL = _MSLLHOOKSTRUCT
 
-    def _mouse_proc(event):
-        # mouse.hook delivers MoveEvent/WheelEvent too; only ButtonEvent
-        # has event_type/button. A rapid second click arrives as 'double',
-        # not 'down', so both count as a press (dedupe window in case a
-        # platform emits both). The mouse package CANNOT suppress events,
-        # and any truthy return would cut off handlers registered after
-        # this one (e.g. the picker's capture hook) — always return None.
-        if mouse is None or not isinstance(event, mouse.ButtonEvent):
-            return None
-        if event.event_type not in ("down", "double") or _picker_capturing[0]:
-            return None
-        if event.button in [t["button"] for t in _mouse_triggers]:
-            now = time.time()
-            if now - _last_mouse_evt[0] < 0.1:
-                return None
-            _last_mouse_evt[0] = now
-            route = next(t["route"] for t in _mouse_triggers
-                         if t["button"] == event.button)
-            _dispatch_trigger(route)
-        return None
+    _WM_BTN_DOWN = {0x0201: "left", 0x0204: "right", 0x0207: "middle", 0x020B: "x"}
+    _WM_BTN_UP = {0x0202: "left", 0x0205: "right", 0x0208: "middle", 0x020C: "x"}
 
-    if mouse is not None and _mouse_triggers:
-        mouse.hook(_mouse_proc)
-    elif _mouse_triggers:
-        log_error("A hotkey is a mouse button but the `mouse` package is "
-                  "missing (pip install mouse) — trigger will not fire")
+    def _msll_button(wParam, mouse_data):
+        name = (_WM_BTN_DOWN.get(wParam) or _WM_BTN_UP.get(wParam))
+        if name == "x":
+            name = "x2" if (mouse_data >> 16) == 2 else "x"
+        return name
+
+    _mouse_ll_proc_ref = None
+    _mouse_ll_handle = 0
+
+    if _MSLL is not None and _mouse_triggers:
+        _MOUSEPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_int, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.POINTER(_MSLL))
+        _trigger_buttons = {t["button"] for t in _mouse_triggers}
+
+        def _msll_proc(nCode, wParam, lParam):
+            try:
+                if nCode == 0 and not _picker_capturing[0]:
+                    name = _msll_button(wParam, lParam.contents.mouseData)
+                    if name in _trigger_buttons and wParam in _WM_BTN_DOWN:
+                        route = next(t["route"] for t in _mouse_triggers
+                                     if t["button"] == name)
+                        _dispatch_trigger(route)
+                        return 1  # swallow: ours alone
+            except Exception as e:
+                log_error(f"mouse hook error: {e}")
+            return ctypes.windll.user32.CallNextHookEx(0, nCode, wParam, lParam)
+
+        _mouse_ll_proc_ref = _MOUSEPROC(_msll_proc)
+        _mouse_ll_handle = ctypes.windll.user32.SetWindowsHookExW(
+            14,  # WH_MOUSE_LL
+            _mouse_ll_proc_ref,
+            0, 0,
+        )
+
+    if not _mouse_ll_handle:
+        if _mouse_triggers:
+            if mouse is not None:
+                mouse.hook(_mouse_proc)
+                log_error("WH_MOUSE_LL failed; using mouse-package hook (cannot suppress)")
+            else:
+                log_error("No mouse hook available — mouse triggers inactive")
 
     def _hotkey_poll() -> None:
         """Watch for config reload and rebuild the trigger table."""
@@ -3190,6 +3239,11 @@ def main() -> None:
         try:
             if _hook_handle:
                 ctypes.windll.user32.UnhookWindowsHookEx(_hook_handle)
+        except Exception:
+            pass
+        try:
+            if _mouse_ll_handle:
+                ctypes.windll.user32.UnhookWindowsHookEx(_mouse_ll_handle)
         except Exception:
             pass
         try:
