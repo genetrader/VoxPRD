@@ -58,9 +58,21 @@ Google Remote Desktop (see hotkey notes).
 - **Route before you speak** — bind hotkeys to destinations: one trigger
   pastes straight into your AI chat with Enter, another goes directly to
   PRD (no popup), each with a live "● REC →" tag. A router hotkey opens a
-  small palette to pick. Or skip keys entirely: say the route's spoken
-  alias as the first word — "zed: fix the login bug" — and it's routed,
-  prefix stripped. "scratch that" discards.
+  small palette to pick (click or number key; `router_hotkey` accepts
+  comma-separated triggers including mouse buttons like `mouse:middle`;
+  `palette_timeout` seconds before it closes, default 20). Or skip keys
+  entirely: say the route's spoken alias as the first word — "zed: fix
+  the login bug" — and it's routed, prefix stripped. "scratch that"
+  discards. Routes are defined in `config.json` under `"routes"`:
+
+  ```jsonc
+  { "name": "Z Code", "trigger": "ctrl+alt+z", "mode": "paste",
+    "target": "zcode.exe", "enter": true, "spoken": "zed" }
+  ```
+
+  `mode` is `paste` (steered paste into `target`), `prd`, or `copy`;
+  `enter` overrides the global Enter setting; `spoken` is the optional
+  first-word alias.
 - **Paste targets — dictate into another app while you keep working.**
   Whitelist the apps that should receive your transcriptions (Settings →
   *Paste Target…*). Keep typing in your editor, hit the hotkey, talk —

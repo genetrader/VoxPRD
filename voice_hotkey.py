@@ -1935,7 +1935,7 @@ def main() -> None:
 
     def _run_hotkey_picker() -> None:
         capture_queue: "queue.Queue[str]" = queue.Queue()
-        state: dict = {"hotkey": None}
+        state: dict = {"hotkey": None, "rect": (0, 0, 0, 0)}
 
         # Hook-based capture (not keyboard.read_hotkey): no lingering
         # threads, and unhooked the moment listening stops.
@@ -1970,6 +1970,11 @@ def main() -> None:
                     and _picker_capturing[0]
                     and event.event_type in ("down", "double")
                     and event.button in _MOUSE_BUTTON_NAMES):
+                pt = ctypes.wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                l, t_, r, b = state["rect"]
+                if l <= pt.x <= r and t_ <= pt.y <= b:
+                    return  # a click on the picker itself (Save/Cancel), not a hotkey
                 capture_queue.put(f"mouse:{event.button}")
 
         def _stop_listening() -> None:
@@ -2010,6 +2015,12 @@ def main() -> None:
                 _listen()
                 root.deiconify()
                 root.lift()
+            try:
+                state["rect"] = (root.winfo_rootx(), root.winfo_rooty(),
+                                 root.winfo_rootx() + root.winfo_width(),
+                                 root.winfo_rooty() + root.winfo_height())
+            except Exception:
+                pass
             try:
                 canon = capture_queue.get_nowait()
             except queue.Empty:
@@ -2950,7 +2961,11 @@ def main() -> None:
             pal.geometry(f"+{max(0, pt.x - 60)}+{max(0, pt.y - 20)}")
         except Exception:
             pass
-        pal.after(3500, cancel)
+        try:
+            pal_secs = int(CONFIG.get("palette_timeout", 20))
+        except (TypeError, ValueError):
+            pal_secs = 20
+        pal.after(max(3, pal_secs) * 1000, cancel)
         pal.deiconify()
         pal.lift()
         pal.focus_force()
@@ -2981,7 +2996,8 @@ def main() -> None:
         _add(CONFIG.get("hotkey", "ctrl+alt+v"), None)
         for r in CONFIG.get("routes", []):
             _add(r.get("trigger"), r)
-        _add(CONFIG.get("router_hotkey", ""), _ROUTER)
+        for hk in str(CONFIG.get("router_hotkey", "")).split(","):
+            _add(hk, _ROUTER)
 
     _rebuild_triggers()
     try:
