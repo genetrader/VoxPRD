@@ -2870,14 +2870,11 @@ def main() -> None:
     _last_esc: list[float] = [0.0]
 
     def _on_escape(e):
-        if not recorder.is_recording:
+        if _palette[0] is not None:
+            _ui.run(lambda: _close_palette(cancel=True))
             return
-        now = time.time()
-        if now - _last_esc[0] < 0.6:
-            recorder.abort()
-            _last_esc[0] = 0.0
-        else:
-            _last_esc[0] = now
+        if recorder.is_recording:
+            threading.Thread(target=recorder.abort, daemon=True).start()
 
     try:
         keyboard.on_press_key("escape", _on_escape, suppress=False)
@@ -3072,7 +3069,9 @@ def main() -> None:
             if route == _ROUTER:
                 if _palette[0] is not None:
                     _ui.run(lambda: _close_palette(cancel=True))
-                elif not recorder.is_recording:
+                elif recorder.is_recording:
+                    threading.Thread(target=recorder.abort, daemon=True).start()
+                else:
                     _ui.run(_open_route_palette)
                 return
             _armed_route[0] = route
