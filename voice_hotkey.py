@@ -1645,14 +1645,27 @@ def _resolve_paste_target() -> tuple[int, str] | None:
     return None
 
 
-def _force_foreground(hwnd: int) -> None:
-    if ctypes.windll.user32.SetForegroundWindow(hwnd):
-        return
+def _force_foreground(hwnd: int) -> bool:
+    """Focus a window, handling the two ways Windows fights back:
+    minimized targets (restore first) and foreground-lock (ALT-nudge,
+    then verify and retry)."""
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        time.sleep(0.05)
+    user32.BringWindowToTop(hwnd)
+    if user32.SetForegroundWindow(hwnd):
+        return True
     # Windows denies focus changes from background processes; a synthetic
     # ALT press re-grants the right (standard workaround).
     keyboard.press("alt")
     keyboard.release("alt")
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    time.sleep(0.03)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.15)
+    if user32.GetForegroundWindow() != hwnd:
+        user32.SetForegroundWindow(hwnd)
+    return user32.GetForegroundWindow() == hwnd
 
 
 def _auto_paste_after_copy() -> None:
