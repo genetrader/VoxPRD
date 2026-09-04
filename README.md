@@ -55,6 +55,12 @@ Google Remote Desktop (see hotkey notes).
   Save keeps it, Clear re-listens, Cancel discards. `win+…` combos are
   rejected (OS-reserved). Quick double-press aborts a recording.
 - **Live waveform overlay** while recording; tray icon shows state.
+- **Route before you speak** — bind hotkeys to destinations: one trigger
+  pastes straight into your AI chat with Enter, another goes directly to
+  PRD (no popup), each with a live "● REC →" tag. A router hotkey opens a
+  small palette to pick. Or skip keys entirely: say the route's spoken
+  alias as the first word — "zed: fix the login bug" — and it's routed,
+  prefix stripped. "scratch that" discards.
 - **Paste targets — dictate into another app while you keep working.**
   Whitelist the apps that should receive your transcriptions (Settings →
   *Paste Target…*). Keep typing in your editor, hit the hotkey, talk —
@@ -135,6 +141,9 @@ For auto-start at login: `Win+R` → `shell:startup` → paste a shortcut to
   "auto_copy_to_clipboard": true,        // transcription goes on the clipboard immediately
   "auto_paste_to_field": false,          // paste into whatever field you're focused in
   "auto_paste_enter": false,             // ...and press Enter after pasting (chat boxes)
+  "routes": [],                          // per-hotkey destinations: see "Route before you speak"
+  "router_hotkey": "",                   // hotkey that opens the route palette
+  "voice_routes_enabled": true,          // first-word spoken routing ("zed: ...", "prd: ...")
   "overlay_timeout": 60,                 // memo popup auto-closes after Ns (0 = keep open)
   "start_tone": "classic",               // classic | chime | hum | bloom | zen
   "stop_tone": "classic",

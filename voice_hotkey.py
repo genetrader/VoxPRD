@@ -1,26 +1,22 @@
-"""Voice Hotkey — local-first dictation + Discord poster.
+"""VoxPRD (formerly Voice Hotkey) — local-first voice dictation + PRD.
 
-System tray app that:
-  1. Listens for a global hotkey (default: pagedown; pause/break aborts).
-  2. Records audio from the default mic with a live waveform overlay.
-  3. Transcribes via a configured provider chain
-     (fleet Whisper -> OpenAI Whisper -> local openai-whisper).
-  4. Shows a Send / Copy / PRD choice overlay.
-  5. Routes the message to the right Discord channel via webhook.
+System tray app:
+  1. A global hotkey (keyboard combo or mouse button) starts/stops recording.
+     Each entry in config "routes" binds ANOTHER trigger to a fixed
+     destination: paste straight into a named app (+Enter) or go directly
+     to PRD. A router hotkey opens a small palette to pick a route.
+  2. First-word voice routing: say "zed: fix the bug" (a route's spoken
+     alias) and the memo goes there, prefix stripped. "scratch that"
+     discards. Zero latency — plain prefix matching, no LLM.
+  3. Transcription via a provider chain (self-hosted Whisper -> OpenAI ->
+     local whisper), auto-copied to the clipboard and optionally pasted
+     into the focused field or a whitelisted app (focus-steering with
+     restore, per-app Enter).
+  4. PRD generation via a local OpenAI-compatible LLM chain; the finished
+     document tints the overlay yellow and lands on the clipboard.
 
-PRD generation uses its own provider chain (DeepSeek V4 Flash -> GLM/GRM
-local -> OpenAI).
-
-State is split:
-  - Source (committed): this file, config.json, prompts.py, providers.py,
-    appsecrets.py, .gitignore.
-  - Secrets (gitignored): secrets/.env (preferred) or ./.env (legacy).
-  - Runtime state (gitignored): state/recordings/, state/last_*.txt,
-    state/prd_*.txt, state/voice_hotkey_errors.log.
-
-Google Remote Desktop notes: scroll_lock / pause / ctrl+space pass through
-the GRD filter; ctrl+alt+v does not. We register the primary hotkey via
-Win32 RegisterHotKey and fall back to the `keyboard` library if that fails.
+State split: secrets in secrets/ (appsecrets.py loader), runtime state in
+state/, source in the project root.
 """
 
 from __future__ import annotations
@@ -40,7 +36,6 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import keyboard
 
@@ -297,18 +292,6 @@ def parse_hotkey(hotkey_str: str) -> tuple[int, int]:
     return mods, vk
 
 
-def register_system_hotkey(mods: int, vk: int, hotkey_id: int = _HOTKEY_ID) -> bool:
-    return bool(ctypes.windll.user32.RegisterHotKey(None, hotkey_id, mods, vk))
-
-
-def unregister_system_hotkey(hotkey_id: int | None = None) -> None:
-    if hotkey_id is None:
-        ctypes.windll.user32.UnregisterHotKey(None, _HOTKEY_ID)
-        ctypes.windll.user32.UnregisterHotKey(None, _ABORT_HOTKEY_ID)
-    else:
-        ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
-
-
 # ---------------------------------------------------------------------------
 # Hotkey normalization (keyboard combos + mouse buttons)
 # ---------------------------------------------------------------------------
@@ -326,6 +309,33 @@ _picker_capturing = [False]
 
 # True when the primary STT endpoint answered the last health probe.
 _stt_healthy = [True]
+
+# Route armed by a bound hotkey / palette pick, consumed by _process_audio.
+_armed_route: list[dict | None] = [None]
+
+
+def apply_voice_route(text: str, current: dict | None = None) -> tuple[dict | None, str]:
+    """First-word voice routing. Returns (route_or_current, possibly-stripped text).
+
+    - "scratch that" / "never mind" (whole transcript) -> discard route.
+    - first word matching a route's "spoken" alias -> that route, word stripped.
+    - no match -> (current, text) untouched. Deterministic, zero latency.
+    """
+    stripped = text.strip()
+    low = stripped.lower().rstrip(".,!").rstrip()
+    if low in ("scratch that", "never mind", "cancel that", "discard"):
+        return {"mode": "discard", "name": "Discard"}, ""
+    first = stripped.split(None, 1)
+    if not first:
+        return current, text
+    token = first[0].lower().rstrip(":,.!")
+    for r in CONFIG.get("routes", []):
+        aliases = [str(r.get("spoken", "")).lower()]
+        aliases.append(str(r.get("name", "")).lower().replace(" ", ""))
+        if token and token in [a for a in aliases if a]:
+            rest = first[1] if len(first) > 1 else ""
+            return r, rest
+    return current, text
 
 
 def hotkey_is_mouse(hotkey_str: str) -> bool:
@@ -665,6 +675,7 @@ class SendCopyOverlay:
         self._prd_text = ""
         self._timeout_id: str | None = None
         self._generating = False
+        self.prompt_pending = False
         _ui.run(self._build)
         self._ready.wait(timeout=5)
 
@@ -854,15 +865,19 @@ class SendCopyOverlay:
         self._result_event.clear()
         if not self._root:
             return "copy"
-        _ui.run(lambda: self._do_show(text, self._auto_send_timeout))
-        # Block until user clicks (or auto-copy fires)
-        if self._auto_send_timeout > 0:
-            self._result_event.wait(timeout=self._auto_send_timeout + 2)
-            if self._result is None:
-                self._result = "copy"
-                self._hide()
-        else:
-            self._result_event.wait()
+        self.prompt_pending = True
+        try:
+            _ui.run(lambda: self._do_show(text, self._auto_send_timeout))
+            # Block until user clicks (or auto-copy fires)
+            if self._auto_send_timeout > 0:
+                self._result_event.wait(timeout=self._auto_send_timeout + 2)
+                if self._result is None:
+                    self._result = "copy"
+                    self._hide()
+            else:
+                self._result_event.wait()
+        finally:
+            self.prompt_pending = False
         return self._result or "copy"
 
     def _do_show(self, text: str, timeout: int):
@@ -1159,7 +1174,9 @@ class Recorder:
             self.update_icon("green")
             _play_start_tone()
             if self._overlay:
-                self._overlay.show("  ● REC  ", "#DC2626")
+                armed = _armed_route[0]
+                tag = f" → {armed['name']}" if armed and armed.get("name") else ""
+                self._overlay.show(f"  ● REC{tag}  ", "#DC2626")
             notify("Recording...", "Voice Hotkey", timeout=2)
 
             def callback(indata, frames, time_info, status):
@@ -1240,15 +1257,51 @@ class Recorder:
 
             text = result.text
 
-            # Optional: put the transcription on the clipboard immediately,
-            # before the Send/Copy/PRD overlay is shown (Copy still works).
+            # Route resolution: an armed route (bound hotkey / palette pick)
+            # or a spoken first-word route decides what happens next.
+            route = _armed_route[0]
+            _armed_route[0] = None
+            if CONFIG.get("voice_routes_enabled", True):
+                route, text = apply_voice_route(text, route)
+
+            if route and route.get("mode") == "discard":
+                notify("Discarded", "Voice Hotkey", timeout=2)
+                self.update_icon("gray")
+                if self._overlay:
+                    self._overlay.hide()
+                return
+
+            # Copy (explicitly, or as the vehicle for auto-paste).
+            paste_wanted = bool(CONFIG.get("auto_paste_to_field", False)) or (
+                bool(CONFIG.get("paste_target_enabled", False))
+                and bool(CONFIG.get("paste_targets")))
+            want_copy = bool(CONFIG.get("auto_copy_to_clipboard", False)) or paste_wanted or bool(route)
             copied = False
-            if CONFIG.get("auto_copy_to_clipboard", False):
+            if want_copy:
                 try:
                     _copy_to_clipboard(text)
                     copied = True
                 except Exception as e:
                     log_error(f"Auto-copy to clipboard failed: {e}")
+
+            if route and route.get("mode") in ("paste", "prd"):
+                # Bound route: act directly, no popup.
+                notify(f"→ {route.get('name', route.get('mode'))} "
+                       f"via {result.provider} in {result.duration_s:.1f}s",
+                       "Voice Hotkey", timeout=2)
+                try:
+                    LAST_TRANSCRIPTION_PATH.write_text(text, encoding="utf-8")
+                    audio_path.with_suffix(".txt").write_text(text, encoding="utf-8")
+                except OSError as e:
+                    log_error(f"Failed to persist transcription: {e}", audio_path)
+                if self._overlay:
+                    self._overlay.hide()
+                if route.get("mode") == "prd":
+                    self._run_prd_flow(text, audio_path=str(audio_path))
+                else:
+                    self._route_paste(route, text)
+                return
+
             if copied:
                 _auto_paste_after_copy()
 
@@ -1295,6 +1348,49 @@ class Recorder:
             "model": CONFIG.get("whisper_model", "base"),
         })
         return chain
+
+    def _route_paste(self, route: dict, text: str) -> None:
+        """Paste a routed memo straight into the route's target app."""
+        try:
+            _copy_to_clipboard(text)
+        except Exception as e:
+            notify(f"Copy failed: {e}", "Voice Hotkey Error")
+            return
+        target = str(route.get("target", "")).lower()
+        use_enter = route.get("enter")
+        if use_enter is None:
+            use_enter = bool(CONFIG.get("auto_paste_enter", False))
+        hwnds = _find_windows_for_process(target) if target else []
+        if not hwnds:
+            notify(f"{route.get('name')}: app not running — on clipboard",
+                   "Voice Hotkey")
+            if CONFIG.get("auto_paste_to_field", False):
+                _auto_paste_after_copy()
+            return
+        last = _last_active_by_proc.get(target)
+        hwnd = last if last in hwnds else hwnds[0]
+        try:
+            orig = ctypes.windll.user32.GetForegroundWindow()
+        except Exception:
+            orig = 0
+
+        def work() -> None:
+            time.sleep(0.15)
+            try:
+                if ctypes.windll.user32.GetForegroundWindow() != hwnd:
+                    _force_foreground(hwnd)
+                    time.sleep(0.12)
+                keyboard.send("ctrl+v")
+                if use_enter:
+                    time.sleep(0.15)
+                    keyboard.send("enter")
+                if orig and orig != hwnd:
+                    time.sleep(0.05)
+                    _force_foreground(orig)
+            except Exception as e:
+                log_error(f"Route paste failed: {e}")
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _handle_text_choice(self, text: str, audio_path: str | None = None) -> None:
         if not text or not text.strip():
@@ -2722,7 +2818,8 @@ def main() -> None:
                     notify("Speech-to-text endpoint unreachable — check STT configuration",
                            "Voice Hotkey Error")
                     _show_stt_warning()
-                recorder.update_icon("gray")
+                if not recorder.is_recording:
+                    recorder.update_icon("gray")
             time.sleep(45)
 
     threading.Thread(target=_stt_health_loop, daemon=True).start()
@@ -2785,21 +2882,119 @@ def main() -> None:
     WM_KEYDOWN = 0x0100
     WM_SYSKEYDOWN = 0x0104
 
-    # Map the configured hotkey to (modifiers mask, vk). The keyboard lib
-    # + Win32 paths are flaky on this box; the low-level hook is not.
-    _hotkey_mods_mask, _hotkey_vk = 0, 0
-    _abort_vk = 0
-    try:
-        _hk_str = CONFIG.get("hotkey", "ctrl+alt+v")
-        # Mouse-button hotkeys ("mouse:middle") have no VK; the mouse hook owns them.
-        _hotkey_mods_mask, _hotkey_vk = (0, 0) if hotkey_is_mouse(_hk_str) else parse_hotkey(_hk_str)
-        # Abort: double-press of the main hotkey within 600ms.
-        _abort_vk = 0
-    except Exception:
-        _hotkey_mods_mask, _hotkey_vk = 0, 0
+    # --- Route palette (opened by the router hotkey) -----------------------
+    def _open_route_palette() -> None:
+        entries: list[tuple[str, dict | None]] = [
+            (f"{r.get('name', '?')}  ·  {r.get('mode', '')}", r)
+            for r in CONFIG.get("routes", [])
+        ]
+        entries.append(("Clipboard  ·  copy only", {"mode": "copy", "name": "Clipboard"}))
+        if not entries:
+            notify("No routes configured", "Voice Hotkey")
+            return
+        pal = tk.Toplevel(_ui.root)
+        pal.overrideredirect(True)
+        pal.attributes("-topmost", True)
+        pal.configure(bg="#1E1E2E")
+        frame = tk.Frame(pal, bg="#1E1E2E", padx=2, pady=2)
+        frame.pack()
+        tk.Label(frame, text=" Route this memo ", font=("Segoe UI", 9, "bold"),
+                 fg="#A6ADC8", bg="#1E1E2E", anchor="w").pack(fill="x", padx=10, pady=(8, 4))
 
-    # Double-pagedown detection
+        done = [False]
+
+        def choose(route, btn):
+            if done[0]:
+                return
+            done[0] = True
+            _armed_route[0] = route
+            try:
+                pal.destroy()
+            except Exception:
+                pass
+            threading.Thread(target=recorder.toggle, daemon=True).start()
+            if btn is not None:
+                btn.configure(bg="#A6E3A1")
+
+        buttons: list[tk.Button] = []
+
+        def _mk(text, route):
+            i = len(buttons) + 1
+            b = tk.Button(frame, text=f"{i}·{text}", font=("Segoe UI", 10),
+                          fg="#CDD6F4", bg="#2A2A3E", activebackground="#45475A",
+                          relief="flat", anchor="w", padx=12, pady=6,
+                          command=lambda: choose(route, b))
+            b.pack(fill="x", padx=10, pady=2)
+            buttons.append(b)
+
+        for text, route in entries:
+            _mk(text, route)
+
+        def cancel(event=None):
+            if done[0]:
+                return
+            done[0] = True
+            try:
+                pal.destroy()
+            except Exception:
+                pass
+
+        for i in range(1, len(entries) + 1):
+            pal.bind(str(i), lambda e, n=i: choose(entries[n - 1][1], None)
+                     if n <= len(entries) else None)
+        pal.bind("<Escape>", cancel)
+        try:
+            pt = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            pal.update_idletasks()
+            pal.geometry(f"+{max(0, pt.x - 60)}+{max(0, pt.y - 20)}")
+        except Exception:
+            pass
+        pal.after(3500, cancel)
+        pal.deiconify()
+        pal.lift()
+        pal.focus_force()
+
+    # --- Trigger table -----------------------------------------------------
+    # The default hotkey routes like today (focused field / paste targets /
+    # popup choice). Each entry in config "routes" binds its own trigger to
+    # a fixed destination or mode; the router hotkey opens the palette.
+    _ROUTER = "ROUTER"
+    _kb_triggers: list[dict] = []     # {vk, mods, route}  (route None = default)
+    _mouse_triggers: list[dict] = []  # {button, route}
+
+    def _rebuild_triggers() -> None:
+        _kb_triggers.clear()
+        _mouse_triggers.clear()
+        def _add(hk, route):
+            hk = str(hk or "").strip()
+            if not hk:
+                return
+            if hotkey_is_mouse(hk):
+                btn = mouse_button_of(hk)
+                if btn:
+                    _mouse_triggers.append({"button": btn, "route": route})
+            else:
+                mods, vk = parse_hotkey(hk)
+                if vk:
+                    _kb_triggers.append({"vk": vk, "mods": mods, "route": route})
+        _add(CONFIG.get("hotkey", "ctrl+alt+v"), None)
+        for r in CONFIG.get("routes", []):
+            _add(r.get("trigger"), r)
+        _add(CONFIG.get("router_hotkey", ""), _ROUTER)
+
+    _rebuild_triggers()
+    try:
+        with open(STATE_DIR / "_hook_debug.log", "a", encoding="utf-8") as f:
+            kb = len(_kb_triggers)
+            ms = len(_mouse_triggers)
+            f.write(f"[{time.strftime('%H:%M:%S')}] triggers: {kb} kb / {ms} mouse\n")
+    except OSError:
+        pass
+
+    # Double-press abort (shared timing across triggers)
     _last_hotkey_press: list[float] = [0.0]
+    _last_fire_ts: list[float] = [0.0]
     _DOUBLE_PRESS_WINDOW = 0.6
 
     # Must keep a reference to the WINFUNCTYPE; ctypes will GC it otherwise
@@ -2808,29 +3003,52 @@ def main() -> None:
         ctypes.c_int, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.POINTER(ctypes.c_void_p)
     )
 
-    def _dispatch_hotkey_press() -> None:
-        """Shared trigger logic for keyboard and mouse hotkeys."""
+    def _route_label(route) -> str:
+        if route is None:
+            return str(CONFIG.get("hotkey", "?"))
+        if route == _ROUTER:
+            return "palette"
+        return str(route.get("name", route.get("mode", "?")))
+
+    def _dispatch_trigger(route) -> None:
+        """One entry point for every trigger press. NEVER blocks: all work
+        (file I/O, mic setup) happens on the spawned worker thread — the LL
+        hook must return in well under ~300ms or Windows removes it."""
+        if _send_copy_overlay is not None and _send_copy_overlay.prompt_pending:
+            return  # a memo is awaiting its Copy/PRD choice — don't race it
         now = time.time()
         double = now - _last_hotkey_press[0] < _DOUBLE_PRESS_WINDOW
         _last_hotkey_press[0] = 0.0 if double else now
-        # Must dispatch, not call recorder methods directly: Windows
-        # silently removes low-level hooks whose callback exceeds ~300ms,
-        # and mic stream setup can take longer than that.
-        if not _stt_healthy[0]:
+        # Rate-limit: rapid fire/abort cycles reopen/close the mic stream
+        # faster than PortAudio reliably survives (native crash vector).
+        if not double and now - _last_fire_ts[0] < 0.3:
+            return
+        _last_fire_ts[0] = now
+        if not _stt_healthy[0] and not double:
             _show_stt_warning()
-        threading.Thread(
-            target=recorder.abort if double else recorder.toggle,
-            daemon=True,
-        ).start()
-        try:
-            with open(STATE_DIR / "_hook_debug.log", "a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%H:%M:%S')}] {CONFIG.get('hotkey', '?')} -> "
-                        f"{'abort' if double else 'toggle'}\n")
-        except OSError:
-            pass
 
-    def _mods_active() -> bool:
-        """True when the currently-held modifiers equal the hotkey's.
+        def worker() -> None:
+            try:
+                with open(STATE_DIR / "_hook_debug.log", "a", encoding="utf-8") as f:
+                    label = _route_label(route)
+                    f.write(f"[{time.strftime('%H:%M:%S')}] {label} -> "
+                            f"{'abort' if double else 'fire'}\n")
+            except OSError:
+                pass
+            if double:
+                recorder.abort()
+                return
+            if route == _ROUTER:
+                if not recorder.is_recording:
+                    _ui.run(_open_route_palette)
+                return
+            _armed_route[0] = route
+            recorder.toggle()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _mods_active(mask: int) -> bool:
+        """True when the currently-held modifiers equal the trigger's.
 
         The LL hook only sees the vk code, so without this a hotkey like
         win+a would fire on every bare 'a' keystroke.
@@ -2842,16 +3060,39 @@ def main() -> None:
             (MOD_SHIFT, gs(0x10) & 0x8000),     # VK_SHIFT
             (MOD_WIN, (gs(0x5B) | gs(0x5C)) & 0x8000),  # LWIN/RWIN
         ]
-        return all(held == bool(_hotkey_mods_mask & mod) for mod, held in expected)
+        return all(held == bool(mask & mod) for mod, held in expected)
+
+    # Modifier state tracked from the hook stream itself. GetAsyncKeyState
+    # inside the callback races with synthetic (SendInput) combos — ctrl/alt
+    # were observed NOT held at the Z keydown of a ctrl+alt+z injection,
+    # so OS state can't be trusted here. We see every down/up first-hand.
+    _held_mod_bits: set[int] = set()
+    WM_KEYUP = 0x0101
+    WM_SYSKEYUP = 0x0105
+    _MOD_VK_BITS: dict[int, int] = {
+        0x10: MOD_SHIFT, 0xA0: MOD_SHIFT, 0xA1: MOD_SHIFT,
+        0x11: MOD_CONTROL, 0xA2: MOD_CONTROL, 0xA3: MOD_CONTROL,
+        0x12: MOD_ALT, 0xA4: MOD_ALT, 0xA5: MOD_ALT,
+        0x5B: MOD_WIN, 0x5C: MOD_WIN,
+    }
 
     def _low_level_keyboard_proc(nCode, wParam, lParam):
         try:
-            if nCode == 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            if nCode == 0:
                 vk = ctypes.cast(lParam, ctypes.POINTER(ctypes.c_int))[0]
-                if (vk == _hotkey_vk and _hotkey_vk != 0
-                        and not _picker_capturing[0] and _mods_active()):
-                    _dispatch_hotkey_press()
-                    return 1
+                bits = _MOD_VK_BITS.get(vk)
+                if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                    if bits:
+                        _held_mod_bits.add(bits)
+                    if not _picker_capturing[0]:
+                        mask = sum(_held_mod_bits)
+                        for t in _kb_triggers:
+                            if vk == t["vk"] and mask == t["mods"]:
+                                _dispatch_trigger(t["route"])
+                                return 1
+                elif wParam in (WM_KEYUP, WM_SYSKEYUP):
+                    if bits:
+                        _held_mod_bits.discard(bits)
         except Exception as e:
             log_error(f"keyboard hook error: {e}")
         return ctypes.windll.user32.CallNextHookEx(0, nCode, wParam, lParam)
@@ -2875,7 +3116,6 @@ def main() -> None:
         )
 
     # --- Mouse-button trigger (global hook via the `mouse` package) ---
-    _mouse_btn: list[str | None] = [mouse_button_of(CONFIG.get("hotkey", ""))]
     _last_mouse_evt: list[float] = [0.0]
 
     def _mouse_proc(event):
@@ -2889,35 +3129,31 @@ def main() -> None:
             return None
         if event.event_type not in ("down", "double") or _picker_capturing[0]:
             return None
-        if _mouse_btn[0] and event.button == _mouse_btn[0]:
+        if event.button in [t["button"] for t in _mouse_triggers]:
             now = time.time()
             if now - _last_mouse_evt[0] < 0.1:
                 return None
             _last_mouse_evt[0] = now
-            _dispatch_hotkey_press()
+            route = next(t["route"] for t in _mouse_triggers
+                         if t["button"] == event.button)
+            _dispatch_trigger(route)
         return None
 
-    if mouse is not None:
+    if mouse is not None and _mouse_triggers:
         mouse.hook(_mouse_proc)
-        if _mouse_btn[0]:
-            notify("Mouse trigger active", "Voice Hotkey", timeout=2)
-    elif _mouse_btn[0]:
-        log_error("Hotkey is a mouse button but the `mouse` package is missing "
-                  "(pip install mouse) — trigger will not fire")
+    elif _mouse_triggers:
+        log_error("A hotkey is a mouse button but the `mouse` package is "
+                  "missing (pip install mouse) — trigger will not fire")
 
     def _hotkey_poll() -> None:
-        """Watch for config reload and update the active trigger targets."""
+        """Watch for config reload and rebuild the trigger table."""
         while True:
             if _hotkey_reload_event.is_set():
                 _hotkey_reload_event.clear()
-                nonlocal _hotkey_vk, _hotkey_mods_mask
                 try:
-                    hk = CONFIG.get("hotkey", "ctrl+alt+v")
-                    _hotkey_mods_mask, _hotkey_vk = (0, 0) if hotkey_is_mouse(hk) else parse_hotkey(hk)
-                    _mouse_btn[0] = mouse_button_of(hk)
-                except Exception:
-                    _hotkey_mods_mask, _hotkey_vk = 0, 0
-                    _mouse_btn[0] = None
+                    _rebuild_triggers()
+                except Exception as e:
+                    log_error(f"Trigger rebuild failed: {e}")
             time.sleep(0.5)
 
     threading.Thread(target=_hotkey_poll, daemon=True).start()
@@ -2927,7 +3163,7 @@ def main() -> None:
         threading.Thread(target=_preload_whisper, daemon=True).start()
 
     notify(
-        f"Press {hotkey_label} to record — pause/break aborts",
+        f"Press {hotkey_label} to record — double-press aborts",
         "Voice Hotkey active",
         timeout=4,
     )
@@ -2935,7 +3171,17 @@ def main() -> None:
     try:
         icon.run()
     finally:
-        unregister_system_hotkey()
+        try:
+            if _hook_handle:
+                ctypes.windll.user32.UnhookWindowsHookEx(_hook_handle)
+        except Exception:
+            pass
+        try:
+            if mouse is not None:
+                mouse.unhook(_mouse_proc)
+        except Exception:
+            pass
+        keyboard.unhook_all()
 
 
 def _safe_read_text(path: Path) -> str:

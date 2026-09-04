@@ -240,6 +240,8 @@ def transcribe_with_retry(audio_path: str, chain: list[dict], *, log=None) -> Wh
 
             if text:
                 return WhisperResult(text=text, provider=name, duration_s=time.time() - started)
+            if log:
+                log(f"{name} returned empty text")
         except Exception as e:
             if log: log(f"{name} threw: {e}")
             continue
