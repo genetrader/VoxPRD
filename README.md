@@ -170,8 +170,8 @@ local Whisper). On a machine with no fleet GPU box:
 2. Much faster if you have any CUDA box: serve
    [SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper)
    `large-v3-turbo` behind an OpenAI-compatible `/v1/audio/transcriptions`
-   endpoint and add it as a `fleet` provider — recipe in
-   `C:\coding\fleet-gpu3060.md` (the default config points at one already).
+   endpoint and add it as a `fleet` provider — the Docker recipe is in
+   the Recommended setup section above.
 3. For PRD generation: tray → **LLM Endpoint & Model…**, type the box's
    `IP:port`, hit **Discover**, pick a model. Any OpenAI-compatible server
    works (llama.cpp server, vLLM, LM Studio, llama-serve…).
